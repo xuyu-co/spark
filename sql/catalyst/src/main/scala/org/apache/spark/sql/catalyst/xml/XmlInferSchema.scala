@@ -45,7 +45,7 @@ import org.apache.spark.sql.internal.{LegacyBehaviorPolicy, SQLConf}
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SparkErrorUtils
 
-class XmlInferSchema(options: XmlOptions, caseSensitive: Boolean)
+class XmlInferSchema(private val options: XmlOptions, private val caseSensitive: Boolean)
     extends Serializable
     with Logging {
 
@@ -72,6 +72,19 @@ class XmlInferSchema(options: XmlOptions, caseSensitive: Boolean)
     options.locale,
     legacyFormat = FAST_DATE_FORMAT,
     isParsing = true)
+
+  override def equals(obj: Any): Boolean = obj match {
+    case other: XmlInferSchema =>
+      options == other.options &&
+      caseSensitive == other.caseSensitive
+    case _ => false
+  }
+
+  override def hashCode(): Int = {
+    var result = options.hashCode()
+    result = 31 * result + (if (caseSensitive) 1 else 0)
+    result
+  }
 
   private def handleXmlErrorsByParseMode(
       parser: XMLEventReader,
@@ -273,11 +286,15 @@ class XmlInferSchema(options: XmlOptions, caseSensitive: Boolean)
           case _: AccessControlException | _: BlockMissingException =>
             parser.close()
             throw e
-          case _: IOException | _: RuntimeException | _: InternalError
+          case _: IOException | _: RuntimeException | _: InternalError | _: AssertionError
               if options.ignoreCorruptFiles =>
             logWarning("Skipped the rest of the content in the corrupted file", e)
             parser.close()
             Some(StructType(Nil))
+          case _: IOException | _: RuntimeException | _: InternalError
+              if !options.ignoreCorruptFiles =>
+            parser.close()
+            throw e
           case _ =>
             logWarning("Failed to infer schema from XML record", e)
             handleXmlErrorsByParseMode(

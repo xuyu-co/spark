@@ -22,6 +22,7 @@ import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.FunctionIdentifier
 import org.apache.spark.sql.catalyst.analysis.{withPosition, Analyzer, SQLFunctionExpression, SQLFunctionNode, SQLScalarFunction, SQLTableFunction, UnresolvedAlias, UnresolvedAttribute, UnresolvedFunction, UnresolvedRelation, UnresolvedTableValuedFunction}
 import org.apache.spark.sql.catalyst.catalog.{SessionCatalog, SQLFunction, UserDefinedFunction, UserDefinedFunctionErrors}
+import org.apache.spark.sql.catalyst.catalog.UserDefinedFunction._
 import org.apache.spark.sql.catalyst.expressions.{Alias, Cast, Expression, Generator, LateralSubquery, Literal, ScalarSubquery, SubqueryExpression, WindowExpression}
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.plans.Inner
@@ -55,6 +56,7 @@ case class CreateSQLFunctionCommand(
     exprText: Option[String],
     queryText: Option[String],
     comment: Option[String],
+    collation: Option[String],
     isDeterministic: Option[Boolean],
     containsSQL: Option[Boolean],
     isTableFunc: Boolean,
@@ -71,8 +73,8 @@ case class CreateSQLFunctionCommand(
     val catalog = sparkSession.sessionState.catalog
     val conf = sparkSession.sessionState.conf
 
-    val inputParam = inputParamText.map(UserDefinedFunction.parseRoutineParam(_, parser))
-    val returnType = parseReturnTypeText(returnTypeText, isTableFunc, parser)
+    val inputParam = inputParamText.map(UserDefinedFunction.parseRoutineParam(_, parser, collation))
+    val returnType = parseReturnTypeText(returnTypeText, isTableFunc, parser, collation)
 
     val function = SQLFunction(
       name,
@@ -81,6 +83,7 @@ case class CreateSQLFunctionCommand(
       exprText,
       queryText,
       comment,
+      collation,
       isDeterministic,
       containsSQL,
       isTableFunc,
@@ -158,7 +161,7 @@ case class CreateSQLFunctionCommand(
         val analyzed = analyzer.execute(plan)
         val (resolved, resolvedReturnType) = analyzed match {
           case p @ Project(expr :: Nil, _) if expr.resolved =>
-            (p, Left(expr.dataType))
+            (p, Left(resolveReturnType(expr.dataType, collation)))
           case other =>
             (other, function.returnType)
         }
@@ -210,7 +213,7 @@ case class CreateSQLFunctionCommand(
               throw UserDefinedFunctionErrors.missingColumnNamesForSqlTableUdf(name.funcName)
             case _ =>
               StructType(analyzed.asInstanceOf[LateralJoin].right.plan.output.map { col =>
-                StructField(col.name, col.dataType)
+                StructField(col.name, resolveReturnType(col.dataType, collation))
               })
           }
         }
@@ -509,7 +512,7 @@ case class CreateSQLFunctionCommand(
     }
     val tempVars = ViewHelper.collectTemporaryVariables(analyzed)
 
-    sqlConfigsToProps(conf) ++
+    sqlConfigsToProps(conf, SQL_CONFIG_PREFIX) ++
       catalogAndNamespaceToProps(
         manager.currentCatalog.name,
         manager.currentNamespace.toIndexedSeq) ++

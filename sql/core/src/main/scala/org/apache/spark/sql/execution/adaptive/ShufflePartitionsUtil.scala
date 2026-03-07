@@ -48,7 +48,8 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
       inputPartitionSpecs: Seq[Option[Seq[ShufflePartitionSpec]]],
       advisoryTargetSize: Long,
       minNumPartitions: Int,
-      minPartitionSize: Long): Seq[Seq[ShufflePartitionSpec]] = {
+      minPartitionSize: Long,
+      shuffleStageIds: Seq[Int] = Seq.empty): Seq[Seq[ShufflePartitionSpec]] = {
     assert(mapOutputStatistics.length == inputPartitionSpecs.length)
 
     if (mapOutputStatistics.isEmpty) {
@@ -71,17 +72,18 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
     // If `inputPartitionSpecs` are all empty, it means skew join optimization is not applied.
     if (inputPartitionSpecs.forall(_.isEmpty)) {
       coalescePartitionsWithoutSkew(
-        mapOutputStatistics, targetSize, minPartitionSize)
+        mapOutputStatistics, targetSize, minPartitionSize, shuffleStageIds)
     } else {
       coalescePartitionsWithSkew(
-        mapOutputStatistics, inputPartitionSpecs, targetSize, minPartitionSize)
+        mapOutputStatistics, inputPartitionSpecs, targetSize, minPartitionSize, shuffleStageIds)
     }
   }
 
   private def coalescePartitionsWithoutSkew(
       mapOutputStatistics: Seq[Option[MapOutputStatistics]],
       targetSize: Long,
-      minPartitionSize: Long): Seq[Seq[ShufflePartitionSpec]] = {
+      minPartitionSize: Long,
+      shuffleStageIds: Seq[Int]): Seq[Seq[ShufflePartitionSpec]] = {
     // `ShuffleQueryStageExec#mapStats` returns None when the input RDD has 0 partitions,
     // we should skip it when calculating the `partitionStartIndices`.
     val validMetrics = mapOutputStatistics.flatten
@@ -95,11 +97,15 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
     // in that case. For example when we union fully aggregated data (data is arranged to a single
     // partition) and a result of a SortMergeJoin (multiple partitions).
     if (validMetrics.map(_.bytesByPartitionId.length).distinct.length > 1) {
+      logWarning(s"Could not apply partition coalescing because numOfPartitions of " +
+        s"ShuffleStages in the same coalesce group are not equal. " +
+        s"Problematic ShuffleQueryStage(s): ${shuffleStageIds.mkString(", ")} and " +
+        s"Problematic mapOutputStatistics: ${getMapOutputStatisticsDetails(validMetrics)}")
       return Seq.empty
     }
 
     val numPartitions = validMetrics.head.bytesByPartitionId.length
-    val newPartitionSpecs = coalescePartitions(
+    val newPartitionSpecs = coalescePartitionsAndGetSpecs(
       0, numPartitions, validMetrics, targetSize, minPartitionSize)
     if (newPartitionSpecs.length < numPartitions) {
       attachDataSize(mapOutputStatistics, newPartitionSpecs)
@@ -112,7 +118,8 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
       mapOutputStatistics: Seq[Option[MapOutputStatistics]],
       inputPartitionSpecs: Seq[Option[Seq[ShufflePartitionSpec]]],
       targetSize: Long,
-      minPartitionSize: Long): Seq[Seq[ShufflePartitionSpec]] = {
+      minPartitionSize: Long,
+      shuffleStageIds: Seq[Int]): Seq[Seq[ShufflePartitionSpec]] = {
     // Do not coalesce if any of the map output stats are missing or if not all shuffles have
     // partition specs, which should not happen in practice.
     if (!mapOutputStatistics.forall(_.isDefined) || !inputPartitionSpecs.forall(_.isDefined)) {
@@ -133,7 +140,9 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
     // There should be no unexpected partition specs and the start indices should be identical
     // across all different shuffles.
     if (partitionIndicesSeq.distinct.length > 1 || partitionIndicesSeq.head.exists(_ < 0)) {
-      logWarning(s"Could not apply partition coalescing because of unexpected partition indices.")
+      logWarning(s"Could not apply partition coalescing because of unexpected partition indices. " +
+        s"Problematic ShuffleQueryStage(s): ${shuffleStageIds.mkString(", ")}. " +
+        s"Invalid shuffle partition specs: $inputPartitionSpecs.")
       return Seq.empty
     }
 
@@ -153,7 +162,7 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
         val repeatValue = partitionIndices(i)
         // coalesce any partitions before partition(i - 1) and after the end of latest skew section.
         if (i - 1 > start) {
-          val partitionSpecs = coalescePartitions(
+          val partitionSpecs = coalescePartitionsAndGetSpecs(
             partitionIndices(start),
             repeatValue,
             validMetrics,
@@ -184,7 +193,7 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
     }
     // coalesce any partitions after the end of last skew section.
     if (numPartitions > start) {
-      val partitionSpecs = coalescePartitions(
+      val partitionSpecs = coalescePartitionsAndGetSpecs(
         partitionIndices(start),
         partitionIndices.last + 1,
         validMetrics,
@@ -200,6 +209,12 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
     } else {
       Seq.empty
     }
+  }
+
+  private def getMapOutputStatisticsDetails(runtimeStats: Seq[MapOutputStatistics]): String = {
+    runtimeStats.map { stats =>
+      s"shuffleId: ${stats.shuffleId} -> numOfPartitions: ${stats.bytesByPartitionId.length}"
+    }.mkString(", ")
   }
 
   /**
@@ -228,7 +243,7 @@ object ShufflePartitionsUtil extends SQLConfHelper with Logging {
    *          CoalescedPartitionSpec(0, 2), CoalescedPartitionSpec(2, 3) and
    *          CoalescedPartitionSpec(3, 5).
    */
-  private def coalescePartitions(
+  private def coalescePartitionsAndGetSpecs(
       start: Int,
       end: Int,
       mapOutputStatistics: Seq[MapOutputStatistics],

@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-import unittest
 
 import numpy as np
 import pandas as pd
@@ -196,6 +195,7 @@ class FrameBinaryOpsMixin:
         pser = pd.Series([1.1, 2.2, 3.3], dtype=np.float32)
         psser = ps.from_pandas(pser)
         self.assert_eq(psser / 1, pser / 1)
+        self.assert_eq(psser / 0, pser / 0)
 
         # Negative
         psdf = ps.DataFrame({"a": ["x"], "b": [1]})
@@ -311,12 +311,6 @@ class FrameBinaryOpsTests(
 
 
 if __name__ == "__main__":
-    from pyspark.pandas.tests.computation.test_binary_ops import *  # noqa: F401
+    from pyspark.testing import main
 
-    try:
-        import xmlrunner
-
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)
+    main()

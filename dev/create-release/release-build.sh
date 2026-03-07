@@ -40,6 +40,7 @@ SPARK_VERSION - (optional) Version of Spark being built (e.g. 2.1.2)
 
 ASF_USERNAME - Username of ASF committer account
 ASF_PASSWORD - Password of ASF committer account
+ASF_NEXUS_TOKEN - API token in ASF Nexus reposiotry
 
 GPG_KEY - GPG key used to sign release artifacts
 GPG_PASSPHRASE - Passphrase for GPG key
@@ -162,7 +163,6 @@ if [[ "$1" == "finalize" ]]; then
   echo "Uploading release docs to spark-website"
   cd spark-website
 
-  # TODO: Test it in the actual release
   # 1. Add download link to documentation.md
   python3 <<EOF
 import re
@@ -172,7 +172,7 @@ is_preview = bool(re.search(r'-preview\d*$', release_version))
 base_version = re.sub(r'-preview\d*$', '', release_version)
 
 stable_newline = f'  <li><a href="{{{{site.baseurl}}}}/docs/{release_version}/">Spark {release_version}</a></li>'
-preview_newline = f'  <li><a href="{{{{site.baseurl}}}}/docs/{release_version}/">Spark {release_version} preview</a></li>'
+preview_newline = f'  <li><a href="{{{{site.baseurl}}}}/docs/{release_version}/">Spark {release_version}</a></li>'
 
 inserted = False
 
@@ -318,10 +318,10 @@ meta:
   _wpas_done_all: '1'
 ---
 To enable wide-scale community testing of the upcoming Spark ${BASE_VERSION} release, the Apache Spark community has posted a
-<a href="https://archive.apache.org/dist/spark/spark-${RELEASE_VERSION}/">Spark ${RELEASE_VERSION} release</a>.
+<a href="${RELEASE_LOCATION}/spark-${RELEASE_VERSION}">Spark ${RELEASE_VERSION} release</a>.
 This preview is not a stable release in terms of either API or functionality, but it is meant to give the community early
 access to try the code that will become Spark ${BASE_VERSION}. If you would like to test the release,
-please <a href="https://archive.apache.org/dist/spark/spark-${RELEASE_VERSION}/">download</a> it, and send feedback using either
+please <a href="${RELEASE_LOCATION}/spark-${RELEASE_VERSION}">download</a> it, and send feedback using either
 <a href="https://spark.apache.org/community.html">mailing lists</a> or
 <a href="https://issues.apache.org/jira/browse/SPARK/?selectedTab=com.atlassian.jira.jira-projects-plugin:summary-panel">JIRA</a>.
 The documentation is available at the <a href="https://spark.apache.org/docs/${RELEASE_VERSION}/">link</a>.
@@ -344,7 +344,7 @@ meta:
   _edit_last: '4'
   _wpas_done_all: '1'
 ---
-We are happy to announce the availability of <a href="{{site.baseurl}}/releases/spark-release-${RELEASE_VERSION}.html" title="Spark Release ${RELEASE_VERSION}">Apache Spark ${RELEASE_VERSION}</a>! Visit the <a href="{{site.baseurl}}/releases/spark-release-${RELEASE_VERSION}.html" title="Spark Release ${RELEASE_VERSION}">release notes</a> to read about the new features, or <a href="{{site.baseurl}}/downloads.html">download</a> the release today.
+We are happy to announce the availability of <a href="{{site.baseurl}}/releases/spark-release-${RELEASE_VERSION//./-}.html" title="Spark Release ${RELEASE_VERSION}">Apache Spark ${RELEASE_VERSION}</a>! Visit the <a href="{{site.baseurl}}/releases/spark-release-${RELEASE_VERSION//./-}.html" title="Spark Release ${RELEASE_VERSION}">release notes</a> to read about the new features, or <a href="{{site.baseurl}}/downloads.html">download</a> the release today.
 EOF
   fi
 
@@ -402,7 +402,7 @@ You can find the list of resolved issues and detailed changes in the [JIRA relea
 
 We would like to acknowledge all community members for contributing ${ACKNOWLEDGE}"
 
-    FILENAME="releases/_posts/${RELEASE_DATE}-spark-release-${RELEASE_VERSION}.md"
+    FILENAME="releases/_posts/${RELEASE_DATE}-spark-release-${RELEASE_VERSION//./-}.md"
     mkdir -p releases/_posts
     cat > "$FILENAME" <<EOF
 ---
@@ -494,15 +494,18 @@ EOF
   echo "KEYS sync'ed"
   rm -rf svn-spark
 
-  # TODO: Test it in the actual release
   # Release artifacts in the Nexus repository
   # Find latest orgapachespark-* repo for this release version
-  REPO_ID=$(curl --retry 10 --retry-all-errors -s -u "$ASF_USERNAME:$ASF_PASSWORD" \
-    https://repository.apache.org/service/local/staging/profile_repositories | \
-    grep -A 5 "<repositoryId>orgapachespark-" | \
-    awk '/<repositoryId>/ { id = $0 } /<description>/ && $0 ~ /Apache Spark '"$RELEASE_VERSION"'/ { print id }' | \
-    grep -oP '(?<=<repositoryId>)orgapachespark-[0-9]+(?=</repositoryId>)' | \
-    sort -V | tail -n 1)
+  REPO_ID=$(
+    curl --retry 10 --retry-all-errors -s -u "$ASF_USERNAME:$ASF_NEXUS_TOKEN" \
+      https://repository.apache.org/service/local/staging/profile_repositories |
+    grep -A 13 "<repositoryId>orgapachespark-" |
+    awk '/<repositoryId>/ { id = $0 }
+         /<description>/ && $0 ~ /Apache Spark '"$RELEASE_VERSION"'/ { print id }' |
+    sed -n 's/.*<repositoryId>\(orgapachespark-[0-9][0-9]*\)<\/repositoryId>.*/\1/p' |
+    sort -V |
+    tail -n 1
+  )
 
   if [[ -z "$REPO_ID" ]]; then
     echo "No matching staging repository found for Apache Spark $RELEASE_VERSION"
@@ -512,7 +515,7 @@ EOF
   echo "Using repository ID: $REPO_ID"
 
   # Release the repository
-  curl --retry 10 --retry-all-errors -s -u "$APACHE_USERNAME:$APACHE_PASSWORD" \
+  curl --retry 10 --retry-all-errors -s -u "$ASF_USERNAME:$ASF_NEXUS_TOKEN" \
     -H "Content-Type: application/json" \
     -X POST https://repository.apache.org/service/local/staging/bulk/promote \
     -d "{\"data\": {\"stagedRepositoryIds\": [\"$REPO_ID\"], \"description\": \"Apache Spark $RELEASE_VERSION\"}}"
@@ -520,9 +523,13 @@ EOF
   # Wait for release to complete
   echo "Waiting for release to complete..."
   while true; do
-    STATUS=$(curl --retry 10 --retry-all-errors -s -u "$APACHE_USERNAME:$APACHE_PASSWORD" \
-      https://repository.apache.org/service/local/staging/repository/$REPO_ID | \
-      grep -oPm1 "(?<=<type>)[^<]+")
+    STATUS=$(
+      curl --retry 10 --retry-all-errors -s -u "$ASF_USERNAME:$ASF_NEXUS_TOKEN" \
+        https://repository.apache.org/service/local/staging/repository/$REPO_ID |
+      sed -n 's:.*<type>\([^<]*\)</type>.*:\1:p' |
+      head -n 1
+    )
+
     echo "Current state: $STATUS"
     if [[ "$STATUS" == "released" ]]; then
       echo "Release complete."
@@ -538,18 +545,17 @@ EOF
   done
 
   # Drop the repository after release
-  curl --retry 10 --retry-all-errors -s -u "$APACHE_USERNAME:$APACHE_PASSWORD" \
+  curl --retry 10 --retry-all-errors -s -u "$ASF_USERNAME:$ASF_NEXUS_TOKEN" \
     -H "Content-Type: application/json" \
     -X POST https://repository.apache.org/service/local/staging/bulk/drop \
     -d "{\"data\": {\"stagedRepositoryIds\": [\"$REPO_ID\"], \"description\": \"Dropped after release\"}}"
 
   echo "Done."
 
-  # TODO: Test it in the actual official release
   # Remove old releases from the mirror
   # Extract major.minor prefix
   RELEASE_SERIES=$(echo "$RELEASE_VERSION" | cut -d. -f1-2)
-  
+
   # Fetch existing dist URLs
   OLD_VERSION=$(svn ls https://dist.apache.org/repos/dist/release/spark/ | \
     grep "^spark-$RELEASE_SERIES" | \
@@ -559,7 +565,7 @@ EOF
   
   if [[ -n "$OLD_VERSION" ]]; then
     echo "Removing old version: spark-$OLD_VERSION"
-    svn rm "https://dist.apache.org/repos/dist/release/spark/spark-$OLD_VERSION" -m "Remove older $RELEASE_SERIES release after $RELEASE_VERSION"
+    svn rm "https://dist.apache.org/repos/dist/release/spark/spark-$OLD_VERSION" --username "$ASF_USERNAME" --password "$ASF_PASSWORD" --non-interactive -m "Remove older $RELEASE_SERIES release after $RELEASE_VERSION"
   else
     echo "No previous $RELEASE_SERIES version found to remove. Manually remove it if there is."
   fi
@@ -835,6 +841,7 @@ if [[ "$1" == "docs" ]]; then
   fi
   bundle install
   PRODUCTION=1 RELEASE_VERSION="$SPARK_VERSION" bundle exec jekyll build
+
   cd ..
   cd ..
 
@@ -992,7 +999,7 @@ if [[ "$1" == "publish-release" ]]; then
     EMAIL_SUBJECT="[VOTE] Release Spark ${SPARK_VERSION} (RC${SPARK_RC_COUNT})"
 
     # Calculate deadline in Pacific Time (PST/PDT)
-    DEADLINE=$(TZ=America/Los_Angeles date -d "+4 days" "+%a, %d %b %Y %H:%M:%S %Z")
+    DEADLINE=$(TZ=America/Los_Angeles date -d "+73 hour" "+%a, %d %b %Y %H:%M:%S %Z")
     PYSPARK_VERSION=`echo "$RELEASE_VERSION" |  sed -e "s/-/./" -e "s/preview/dev/"`
 
     JIRA_API_URL="https://issues.apache.org/jira/rest/api/2/project/SPARK/versions"

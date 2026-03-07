@@ -1236,13 +1236,13 @@ class JoinSuite extends QueryTest with SharedSparkSession with AdaptiveSparkPlan
       SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> Long.MaxValue.toString) {
       // positive not in subquery case
       var joinExec = assertJoin((
-        "select * from testData where key not in (select a from testData2)",
+        "select * from testData where key not in (select b from testData3)",
         classOf[BroadcastHashJoinExec]))
       assert(joinExec.asInstanceOf[BroadcastHashJoinExec].isNullAwareAntiJoin)
 
       // negative not in subquery case since multi-column is not supported
       assertJoin((
-        "select * from testData where (key, key + 1) not in (select * from testData2)",
+        "select * from testData where (key, key + 1) not in (select b, b + 1 from testData3)",
         classOf[BroadcastNestedLoopJoinExec]))
 
       // positive hand-written left anti join
@@ -1268,6 +1268,23 @@ class JoinSuite extends QueryTest with SharedSparkSession with AdaptiveSparkPlan
         "select * from testData2 left anti join testData3 ON testData2.a = testData3.b or " +
           "isnull(testData2.b = testData3.b)",
         classOf[BroadcastNestedLoopJoinExec]))
+    }
+  }
+
+  test("SPARK-54972: Improve not in subqueries with non-nullable columns") {
+    withSQLConf(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> Long.MaxValue.toString) {
+      // testData.key nullable false
+      // testData2.* nullable false
+
+      val joinExec = assertJoin((
+        "select * from testData where key not in (select a from testData2)",
+        classOf[BroadcastHashJoinExec]))
+      assert(!joinExec.asInstanceOf[BroadcastHashJoinExec].isNullAwareAntiJoin)
+
+      val joinExec2 = assertJoin((
+        "select * from testData where (key, key + 1) not in (select * from testData2)",
+        classOf[BroadcastHashJoinExec]))
+      assert(!joinExec2.asInstanceOf[BroadcastHashJoinExec].isNullAwareAntiJoin)
     }
   }
 
@@ -1571,10 +1588,13 @@ class JoinSuite extends QueryTest with SharedSparkSession with AdaptiveSparkPlan
       spark.range(10).map(i => (i.toString, i + 1)).toDF("c1", "c2").write.saveAsTable("t1")
       spark.range(10).map(i => ((i % 5).toString, i % 3)).toDF("c1", "c2").write.saveAsTable("t2")
 
+      spark.range(10).map(i => (i, i + 1)).toDF("c1", "c2").write.saveAsTable("t1a")
+      spark.range(10).map(i => (i % 5, i % 3)).toDF("c1", "c2").write.saveAsTable("t2a")
+
       val semiExpected1 = Seq(Row("0"), Row("1"), Row("2"), Row("3"), Row("4"))
       val antiExpected1 = Seq(Row("5"), Row("6"), Row("7"), Row("8"), Row("9"))
-      val semiExpected2 = Seq(Row("0"))
-      val antiExpected2 = Seq.tabulate(9) { x => Row((x + 1).toString) }
+      val semiExpected2 = Seq(Row(0))
+      val antiExpected2 = Seq.tabulate(9) { x => Row(x + 1) }
 
       val semiJoinQueries = Seq(
         // No join condition, ignore duplicated key.
@@ -1599,9 +1619,9 @@ class JoinSuite extends QueryTest with SharedSparkSession with AdaptiveSparkPlan
         // the same as t2.c2). In this case, ignoreDuplicatedKey should be false
         (
           s"""
-             |SELECT /*+ SHUFFLE_HASH(t2) */ t1.c1 FROM t1 LEFT SEMI JOIN t2
-             |ON CAST((t1.c2+10000)/1000 AS INT) = CAST((t2.c2+10000)/1000 AS INT)
-             |AND t2.c2 >= t1.c2 + 1
+             |SELECT /*+ SHUFFLE_HASH(t2a) */ t1a.c1 FROM t1a LEFT SEMI JOIN t2a
+             |ON CAST((t1a.c2+10000)/1000 AS INT) = CAST((t2a.c2+10000)/1000 AS INT)
+             |AND t2a.c2 >= t1a.c2 + 1
              |""".stripMargin,
         false, semiExpected2, antiExpected2),
         // SPARK-52873: Have a join condition that contains the same expression as the
@@ -1609,8 +1629,8 @@ class JoinSuite extends QueryTest with SharedSparkSession with AdaptiveSparkPlan
         // In this case, ignoreDuplicatedKey should be true
         (
           s"""
-             |SELECT /*+ SHUFFLE_HASH(t2) */ t1.c1 FROM t1 LEFT SEMI JOIN t2
-             |ON t1.c1 * 10000 = t2.c1 * 1000 AND t2.c1 * 1000 >= t1.c1
+             |SELECT /*+ SHUFFLE_HASH(t2a) */ t1a.c1 FROM t1a LEFT SEMI JOIN t2a
+             |ON t1a.c1 * 10000 = t2a.c1 * 1000 AND t2a.c1 * 1000 >= t1a.c1
              |""".stripMargin,
           true, semiExpected2, antiExpected2)
       )

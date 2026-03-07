@@ -227,7 +227,9 @@ final class DataFrameWriterV2[T] private[sql](table: String, ds: Dataset[T])
    * callback functions.
    */
   private def runCommand(command: LogicalPlan): Unit = {
-    val qe = new QueryExecution(sparkSession, command, df.queryExecution.tracker)
+    val qe = new QueryExecution(sparkSession, command, df.queryExecution.tracker,
+      shuffleCleanupModeOpt =
+        Some(QueryExecution.determineShuffleCleanupMode(sparkSession.sessionState.conf)))
     qe.assertCommandExecuted()
   }
 
@@ -251,7 +253,7 @@ private object PartitionTransform {
     private val NAMES = Seq(name)
 
     def unapply(e: Expression): Option[Seq[Expression]] = e match {
-      case UnresolvedFunction(NAMES, children, false, None, false, Nil, true) => Option(children)
+      case UnresolvedFunction(NAMES, children, false, None, None, Nil, true) => Option(children)
       case _ => None
     }
   }
