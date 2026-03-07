@@ -18,13 +18,16 @@
 package org.apache.spark.sql.connector.catalog
 
 import java.util
+import java.util.{Objects, UUID}
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.catalog.constraints.Constraint
 import org.apache.spark.sql.connector.distributions.{Distribution, Distributions}
 import org.apache.spark.sql.connector.expressions.{SortOrder, Transform}
+import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, SupportsOverwrite, WriteBuilder, WriterCommitMessage}
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.util.ArrayImplicits._
 
@@ -42,7 +45,8 @@ class InMemoryTable(
     numPartitions: Option[Int] = None,
     advisoryPartitionSize: Option[Long] = None,
     isDistributionStrictlyRequired: Boolean = true,
-    override val numRowsPerSplit: Int = Int.MaxValue)
+    override val numRowsPerSplit: Int = Int.MaxValue,
+    override val id: String = UUID.randomUUID().toString)
   extends InMemoryBaseTable(name, columns, partitioning, properties, constraints, distribution,
     ordering, numPartitions, advisoryPartitionSize, isDistributionStrictlyRequired,
     numRowsPerSplit) with SupportsDelete {
@@ -67,7 +71,7 @@ class InMemoryTable(
     import org.apache.spark.sql.connector.catalog.CatalogV2Implicits.MultipartIdentifierHelper
     dataMap --= InMemoryTable
       .filtersToKeys(dataMap.keys, partCols.map(_.toSeq.quoted).toImmutableArraySeq, filters)
-    increaseCurrentVersion()
+    increaseVersion()
   }
 
   override def withData(data: Array[BufferedRows]): InMemoryTable = {
@@ -107,7 +111,7 @@ class InMemoryTable(
           row.getInt(0) == InMemoryTable.uncommittableValue()))) {
         throw new IllegalArgumentException(s"Test only mock write failure")
       }
-      increaseCurrentVersion()
+      increaseVersion()
       this
     }
   }
@@ -123,6 +127,52 @@ class InMemoryTable(
     InMemoryBaseTable.maybeSimulateFailedTableWrite(info.options)
 
     new InMemoryWriterBuilderWithOverWrite(info)
+  }
+
+  override def copy(): Table = {
+    val copiedTable = new InMemoryTable(
+      name,
+      columns(),
+      partitioning,
+      properties,
+      constraints,
+      distribution,
+      ordering,
+      numPartitions,
+      advisoryPartitionSize,
+      isDistributionStrictlyRequired,
+      numRowsPerSplit,
+      id)
+
+    dataMap.synchronized {
+      dataMap.foreach { case (key, splits) =>
+        val copiedSplits = splits.map { bufferedRows =>
+          val copiedBufferedRows = new BufferedRows(bufferedRows.key, bufferedRows.schema)
+          copiedBufferedRows.rows ++= bufferedRows.rows.map(_.copy())
+          copiedBufferedRows
+        }
+        copiedTable.dataMap.put(key, copiedSplits)
+      }
+    }
+
+    copiedTable.commits ++= commits.map(_.copy())
+
+    copiedTable.setVersion(version())
+    if (validatedVersion() != null) {
+      copiedTable.setValidatedVersion(validatedVersion())
+    }
+
+    copiedTable
+  }
+
+  override def equals(other: Any): Boolean = other match {
+    case that: InMemoryTable =>
+      this.id == that.id && this.version() == that.version()
+    case _ => false
+  }
+
+  override def hashCode(): Int = {
+    Objects.hash(id, version())
   }
 
   class InMemoryWriterBuilderWithOverWrite(override val info: LogicalWriteInfo)
@@ -212,4 +262,72 @@ object InMemoryTable {
       case _ => filter :: Nil
     }
   }
+}
+
+/**
+ * A metadata table that returns snapshot (commit) information for a parent table.
+ * Simulates data source tables with multi-part identifiers, ex Iceberg's db.table.snapshots.
+ */
+class InMemorySnapshotsTable(parentTable: InMemoryTable) extends Table with SupportsRead {
+  override def name(): String = parentTable.name + ".snapshots"
+
+  override def schema(): StructType = StructType(Seq(
+    StructField("committed_at", LongType, nullable = false),
+    StructField("snapshot_id", LongType, nullable = false)
+  ))
+
+  override def capabilities(): util.Set[TableCapability] = {
+    util.EnumSet.of(TableCapability.BATCH_READ)
+  }
+
+  override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder = {
+    new InMemorySnapshotsScanBuilder(parentTable)
+  }
+}
+
+class InMemorySnapshotsScanBuilder(parentTable: InMemoryTable) extends ScanBuilder {
+  override def build(): Scan = new InMemorySnapshotsScan(parentTable)
+}
+
+class InMemorySnapshotsScan(parentTable: InMemoryTable) extends Scan with Batch {
+  override def readSchema(): StructType = StructType(Seq(
+    StructField("committed_at", LongType, nullable = false),
+    StructField("snapshot_id", LongType, nullable = false)
+  ))
+
+  override def toBatch: Batch = this
+
+  override def planInputPartitions(): Array[InputPartition] = {
+    Array(InMemorySnapshotsPartition(parentTable.commits.toSeq.map(c => (c.id, c.id))))
+  }
+
+  override def createReaderFactory(): PartitionReaderFactory = {
+    new InMemorySnapshotsReaderFactory()
+  }
+}
+
+case class InMemorySnapshotsPartition(snapshots: Seq[(Long, Long)]) extends InputPartition
+
+class InMemorySnapshotsReaderFactory extends PartitionReaderFactory {
+  override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
+    new InMemorySnapshotsReader(partition.asInstanceOf[InMemorySnapshotsPartition])
+  }
+}
+
+class InMemorySnapshotsReader(partition: InMemorySnapshotsPartition)
+    extends PartitionReader[InternalRow] {
+  private var index = -1
+  private val snapshots = partition.snapshots
+
+  override def next(): Boolean = {
+    index += 1
+    index < snapshots.size
+  }
+
+  override def get(): InternalRow = {
+    val (committedAt, snapshotId) = snapshots(index)
+    InternalRow(committedAt, snapshotId)
+  }
+
+  override def close(): Unit = {}
 }

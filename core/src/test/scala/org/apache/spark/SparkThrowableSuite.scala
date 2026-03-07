@@ -37,17 +37,13 @@ import org.apache.spark.util.Utils
 
 /**
  * Test suite for Spark Throwables.
+ * To re-generate the error class file, run:
+ * {{{
+ *   SPARK_GENERATE_GOLDEN_FILES=1 build/sbt \
+ *     "core/testOnly *SparkThrowableSuite -- -t \"Error conditions are correctly formatted\""
+ * }}}
  */
 class SparkThrowableSuite extends SparkFunSuite {
-
-  /* Used to regenerate the error class file. Run:
-   {{{
-      SPARK_GENERATE_GOLDEN_FILES=1 build/sbt \
-        "core/testOnly *SparkThrowableSuite -- -t \"Error conditions are correctly formatted\""
-   }}}
-   */
-  private val regenerateCommand = "SPARK_GENERATE_GOLDEN_FILES=1 build/sbt " +
-    "\"core/testOnly *SparkThrowableSuite -- -t \\\"Error conditions are correctly formatted\\\"\""
 
   private val errorJsonFilePath = getWorkspaceFilePath(
     "common", "utils", "src", "main", "resources", "error", "error-conditions.json")
@@ -75,7 +71,8 @@ class SparkThrowableSuite extends SparkFunSuite {
       .addModule(DefaultScalaModule)
       .enable(STRICT_DUPLICATE_DETECTION)
       .build()
-    mapper.readValue(errorJsonFilePath.toUri.toURL, new TypeReference[Map[String, ErrorInfo]]() {})
+    mapper.readValue(
+      errorJsonFilePath.toUri.toURL.openStream(), new TypeReference[Map[String, ErrorInfo]]() {})
   }
 
   test("Error conditions are correctly formatted") {
@@ -88,7 +85,7 @@ class SparkThrowableSuite extends SparkFunSuite {
     val prettyPrinter = new DefaultPrettyPrinter()
       .withArrayIndenter(DefaultIndenter.SYSTEM_LINEFEED_INSTANCE)
     val rewrittenString = mapper.configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true)
-      .setSerializationInclusion(Include.NON_ABSENT)
+      .setDefaultPropertyInclusion(Include.NON_ABSENT)
       .writer(prettyPrinter)
       .writeValueAsString(errorReader.errorInfoMap)
 
@@ -124,9 +121,9 @@ class SparkThrowableSuite extends SparkFunSuite {
       .enable(STRICT_DUPLICATE_DETECTION)
       .build()
     val errorClasses = mapper.readValue(
-      errorClassesJson, new TypeReference[Map[String, String]]() {})
+      errorClassesJson.openStream(), new TypeReference[Map[String, String]]() {})
     val errorStates = mapper.readValue(
-      errorStatesJson, new TypeReference[Map[String, ErrorStateInfo]]() {})
+      errorStatesJson.openStream(), new TypeReference[Map[String, ErrorStateInfo]]() {})
     val errorConditionStates = errorReader.errorInfoMap.values.toSeq.flatMap(_.sqlState).toSet
     assert(Set("22012", "22003", "42601").subsetOf(errorStates.keySet))
     assert(errorClasses.keySet.filter(!_.matches("[A-Z0-9]{2}")).isEmpty)
@@ -619,7 +616,6 @@ class SparkThrowableSuite extends SparkFunSuite {
     // Create a custom throwable that overrides getDefaultMessageTemplate.
     class CustomTemplatedThrowable extends Throwable with SparkThrowable {
       override def getCondition: String = "DIVIDE_BY_ZERO"
-      override def getErrorClass: String = "DIVIDE_BY_ZERO"
       override def getMessage: String = "Custom message"
       override def getMessageParameters: java.util.Map[String, String] =
         Map("config" -> "TEST_CONFIG").asJava
@@ -642,7 +638,6 @@ class SparkThrowableSuite extends SparkFunSuite {
     // Create a throwable that uses default getDefaultMessageTemplate implementation.
     class ReadFromJSONThrowable extends Throwable with SparkThrowable {
       override def getCondition: String = "DIVIDE_BY_ZERO"
-      override def getErrorClass: String = "DIVIDE_BY_ZERO"
       override def getMessage: String = "Random message"
       override def getMessageParameters: java.util.Map[String, String] =
         Map("config" -> "TEST_CONFIG").asJava
@@ -664,7 +659,6 @@ class SparkThrowableSuite extends SparkFunSuite {
     // Create a throwable with non-existing error condition.
     class NonExistingConditionThrowable extends Throwable with SparkThrowable {
       override def getCondition: String = "NON_EXISTING_ERROR_CONDITION"
-      override def getErrorClass: String = "NON_EXISTING_ERROR_CONDITION"
       override def getMessage: String = "Non-existing error message"
       override def getMessageParameters: java.util.Map[String, String] =
         Map("param" -> "value").asJava
@@ -692,5 +686,118 @@ class SparkThrowableSuite extends SparkFunSuite {
     // Verify the message is formatted correctly.
     assert(result == "[TEST_CUSTOM_TEMPLATE] Custom error: " +
       "something occurred with somewhere SQLSTATE: 42S01")
+  }
+
+  test("Custom SQL state takes precedence over error class reader - SparkException") {
+    // Test with custom SQL state - should return the custom one
+    val exceptionWithCustomSqlState = new SparkException(
+      message = getMessage("CANNOT_PARSE_DECIMAL", Map.empty[String, String]),
+      cause = null,
+      errorClass = Some("CANNOT_PARSE_DECIMAL"),
+      messageParameters = Map.empty[String, String],
+      context = Array.empty,
+      sqlState = Some("CUSTOM"))
+
+    assert(exceptionWithCustomSqlState.getSqlState == "CUSTOM",
+      "Custom SQL state should take precedence")
+
+    // Test without custom SQL state - should fall back to error class reader
+    val exceptionWithoutCustomSqlState = new SparkException(
+      message = getMessage("CANNOT_PARSE_DECIMAL", Map.empty[String, String]),
+      cause = null,
+      errorClass = Some("CANNOT_PARSE_DECIMAL"),
+      messageParameters = Map.empty[String, String],
+      context = Array.empty,
+      sqlState = None)
+
+    assert(exceptionWithoutCustomSqlState.getSqlState == "22018",
+      "Should fall back to error class reader SQL state")
+  }
+
+  test("SparkArithmeticException uses error class reader for SQL state") {
+    // Test that SparkArithmeticException falls back to error class reader
+    val exception = new SparkArithmeticException(
+      errorClass = "DIVIDE_BY_ZERO",
+      messageParameters = Map("config" -> "CONFIG"),
+      context = Array.empty,
+      summary = "")
+
+    assert(exception.getSqlState == "22012",
+      "Should use error class reader SQL state")
+  }
+
+  test("SparkRuntimeException uses error class reader for SQL state") {
+    // Test that SparkRuntimeException falls back to error class reader
+    val exception = new SparkRuntimeException(
+      errorClass = "INTERNAL_ERROR",
+      messageParameters = Map("message" -> "test"))
+
+    assert(exception.getSqlState.startsWith("XX"),
+      "Should use error class reader SQL state")
+  }
+
+  test("SparkIllegalArgumentException uses error class reader for SQL state") {
+    // Test that SparkIllegalArgumentException falls back to error class reader
+    val exception = new SparkIllegalArgumentException(
+      errorClass = "UNSUPPORTED_SAVE_MODE.EXISTENT_PATH",
+      messageParameters = Map("saveMode" -> "TEST"))
+
+    assert(exception.getSqlState == "0A000",
+      "Should use error class reader SQL state")
+  }
+
+  test("Custom SQL state takes precedence - Multiple exception types") {
+    // SparkSQLException
+    val sqlException = new SparkSQLException(
+      errorClass = "CANNOT_PARSE_DECIMAL",
+      messageParameters = Map.empty[String, String],
+      sqlState = Some("CUST1"))
+    assert(sqlException.getSqlState == "CUST1")
+
+    // SparkSecurityException
+    val securityException = new SparkSecurityException(
+      errorClass = "CANNOT_PARSE_DECIMAL",
+      messageParameters = Map.empty[String, String],
+      sqlState = Some("CUST2"))
+    assert(securityException.getSqlState == "CUST2")
+
+    // SparkNumberFormatException
+    val numberFormatException = new SparkNumberFormatException(
+      errorClass = "CANNOT_PARSE_DECIMAL",
+      messageParameters = Map.empty[String, String],
+      context = Array.empty,
+      summary = "")
+    assert(numberFormatException.getSqlState == "22018",
+      "Should use error class reader SQL state when custom not provided")
+  }
+
+  test("Custom SQL state takes precedence - Java exception (SparkOutOfMemoryError)") {
+    import org.apache.spark.memory.SparkOutOfMemoryError
+
+    // Test without custom SQL state - should fall back to error class reader
+    val errorWithoutCustom = new SparkOutOfMemoryError(
+      "CANNOT_PARSE_DECIMAL",
+      Map.empty[String, String].asJava)
+
+    assert(errorWithoutCustom.getSqlState == "22018",
+      "Should use error class reader SQL state when custom not provided")
+
+    // Test with custom SQL state - should return the custom one
+    val errorWithCustom = new SparkOutOfMemoryError(
+      "CANNOT_PARSE_DECIMAL",
+      Map.empty[String, String].asJava,
+      "CUSTOM")
+
+    assert(errorWithCustom.getSqlState == "CUSTOM",
+      "Custom SQL state should take precedence over error class reader")
+
+    // Test with null custom SQL state - should fall back to error class reader
+    val errorWithNull = new SparkOutOfMemoryError(
+      "CANNOT_PARSE_DECIMAL",
+      Map.empty[String, String].asJava,
+      null)
+
+    assert(errorWithNull.getSqlState == "22018",
+      "Should fall back to error class reader SQL state when custom is null")
   }
 }

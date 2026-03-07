@@ -40,6 +40,8 @@ message PipelineCommand {
     DefineSqlGraphElements define_sql_graph_elements = 6;
     GetQueryFunctionExecutionSignalStream get_query_function_execution_signal_stream = 7;
     DefineFlowQueryFunctionResult define_flow_query_function_result = 8;
+    ExecuteOutputFlows execute_output_flows = 9;
+
     // Reserved field for protocol extensions.
     // Used to support forward-compatibility by carrying additional command types
     // that are not yet defined in this version of the proto. During planning, the
@@ -104,6 +106,9 @@ message PipelineCommand {
         spark.connect.DataType schema_data_type = 4;
         string schema_string = 5;
       }
+
+      // Optional cluster columns for the table.
+      repeated string clustering_columns = 6;
     }
 
     // Metadata that's only applicable to sinks.
@@ -149,10 +154,36 @@ message PipelineCommand {
       optional spark.connect.Relation relation = 1;
     }
 
+    // If true, define the flow as a one-time flow, such as for backfill.
+    // Set to true changes the flow in two ways:
+    //   - The flow is run one time by default. If the pipeline is ran with a full refresh,
+    //     the flow will run again.
+    //   - The flow function must be a batch DataFrame, not a streaming DataFrame.
+    optional bool once = 8;
+
     message Response {
       // Fully qualified flow name that uniquely identify a flow in the Dataflow graph.
       optional string flow_name = 1;
     }
+  }
+
+  // Request to execute all flows for a single output (dataset or sink) remotely.
+  message ExecuteOutputFlows {
+
+    // The output (table or materialized view or sink) definition.
+    optional DefineOutput define_output = 1;
+
+    // The flows to execute for this table.
+    repeated DefineFlow define_flows = 2;
+
+    // Whether to perform a full refresh instead of an incremental update.
+    optional bool full_refresh = 3;
+
+    // Storage location for pipeline checkpoints and metadata.
+    optional string storage = 4;
+
+    // Reserved field for protocol extensions.
+    repeated google.protobuf.Any extension = 999;
   }
 
   // Resolves all datasets and flows and start a pipeline update. Should be called after all
@@ -267,6 +298,8 @@ message SourceCodeLocation {
   optional string file_name = 1;
   // The specific line number that this pipeline source code is located at, if applicable.
   optional int32 line_number = 2;
+  // The path of the top-level pipeline file determined at runtime during pipeline initialization.
+  optional string definition_path = 3;
 
   // Reserved field for protocol extensions.
   // Used to support forward-compatibility by carrying additional fields
@@ -279,4 +312,17 @@ message SourceCodeLocation {
 // to register their results with the server.
 message PipelineQueryFunctionExecutionSignal {
   repeated string flow_names = 1;
+}
+
+// Metadata providing context about the pipeline during Spark Connect query analysis.
+message PipelineAnalysisContext {
+  // Unique identifier of the dataflow graph associated with this pipeline.
+  optional string dataflow_graph_id = 1;
+  // The path of the top-level pipeline file determined at runtime during pipeline initialization.
+  optional string definition_path = 2;
+  // The name of the Flow involved in this analysis
+  optional string flow_name = 3;
+
+  // Reserved field for protocol extensions.
+  repeated google.protobuf.Any extension = 999;
 }

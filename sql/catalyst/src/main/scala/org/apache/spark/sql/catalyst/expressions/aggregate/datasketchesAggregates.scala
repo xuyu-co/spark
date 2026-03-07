@@ -66,6 +66,9 @@ case class HllSketchAgg(
   // Hllsketch config - mark as lazy so that they're not evaluated during tree transformation.
 
   lazy val lgConfigK: Int = {
+    if (!right.foldable) {
+      throw QueryExecutionErrors.hllKMustBeConstantError(prettyName)
+    }
     val lgConfigK = right.eval().asInstanceOf[Int]
     HllSketchAgg.checkLgK(lgConfigK)
     lgConfigK
@@ -335,7 +338,8 @@ case class HllUnionAgg(
             union.update(sketch)
             Some(union)
           } catch {
-            case _: SketchesArgumentException | _: java.lang.Error =>
+            case _: SketchesArgumentException | _: java.lang.Error
+                 | _: ArrayIndexOutOfBoundsException =>
               throw QueryExecutionErrors.hllInvalidInputSketchBuffer(prettyName)
           }
         case _ =>

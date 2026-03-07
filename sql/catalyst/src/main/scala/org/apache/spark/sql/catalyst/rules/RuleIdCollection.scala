@@ -73,7 +73,6 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveTranspose" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveUnpivot" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveUpCast" ::
-      "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveUserSpecifiedColumns" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveWindowFrame" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$ResolveWindowOrder" ::
       "org.apache.spark.sql.catalyst.analysis.Analyzer$WindowsSubstitution" ::
@@ -86,6 +85,7 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.analysis.EliminateUnions" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveCollationName" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveDefaultColumns" ::
+      "org.apache.spark.sql.catalyst.analysis.ResolveEventTimeWatermark" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveExecuteImmediate" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveExpressionsWithNamePlaceholders" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveGroupByAll" ::
@@ -97,6 +97,8 @@ object RuleIdCollection {
       "org.apache.spark.sql.catalyst.analysis.ResolveLateralColumnAliasReference" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveOrderByAll" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveRowLevelCommandAssignments" ::
+      "org.apache.spark.sql.catalyst.analysis.ResolveCursors" ::
+      "org.apache.spark.sql.catalyst.analysis.ResolveFetchCursor" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveSetVariable" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveTableConstraints" ::
       "org.apache.spark.sql.catalyst.analysis.ResolveTableSpec" ::

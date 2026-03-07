@@ -24,13 +24,12 @@ import scala.jdk.CollectionConverters._
 import scala.util.Try
 import scala.util.control.NonFatal
 
-import com.google.common.base.Throwables
 import com.google.common.collect.Lists
 import com.google.protobuf.{Any => ProtoAny, ByteString}
 import io.grpc.{Context, Status, StatusRuntimeException}
 import io.grpc.stub.StreamObserver
 
-import org.apache.spark.{SparkClassNotFoundException, SparkEnv, SparkException, TaskContext}
+import org.apache.spark.{SparkClassNotFoundException, SparkEnv, SparkException}
 import org.apache.spark.annotation.{DeveloperApi, Since}
 import org.apache.spark.api.python.{PythonEvalType, SimplePythonFunction}
 import org.apache.spark.connect.proto
@@ -43,7 +42,7 @@ import org.apache.spark.internal.{Logging, LogKeys}
 import org.apache.spark.internal.LogKeys.{DATAFRAME_ID, SESSION_ID}
 import org.apache.spark.resource.{ExecutorResourceRequest, ResourceProfile, TaskResourceProfile, TaskResourceRequest}
 import org.apache.spark.sql.{AnalysisException, Column, Encoders, ForeachWriter, Row}
-import org.apache.spark.sql.catalyst.{expressions, AliasIdentifier, FunctionIdentifier, QueryPlanningTracker}
+import org.apache.spark.sql.catalyst.{expressions, AliasIdentifier, FunctionIdentifier, InternalRow, QueryPlanningTracker}
 import org.apache.spark.sql.catalyst.analysis.{FunctionRegistry, GlobalTempView, LocalTempView, MultiAlias, UnresolvedAlias, UnresolvedAttribute, UnresolvedDataFrameStar, UnresolvedDeserializer, UnresolvedExtractValue, UnresolvedFunction, UnresolvedOrdinal, UnresolvedPlanId, UnresolvedRegex, UnresolvedRelation, UnresolvedStar, UnresolvedStarWithColumns, UnresolvedStarWithColumnsRenames, UnresolvedSubqueryColumnAliases, UnresolvedTableValuedFunction, UnresolvedTranspose}
 import org.apache.spark.sql.catalyst.encoders.{encoderFor, AgnosticEncoder, ExpressionEncoder, RowEncoder}
 import org.apache.spark.sql.catalyst.encoders.AgnosticEncoders.{ProductEncoder, RowEncoder => AgnosticRowEncoder, StringEncoder, UnboundRowEncoder}
@@ -52,7 +51,7 @@ import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.parser.{NamedParameterContext, ParameterContext, ParseException, ParserUtils, PositionalParameterContext}
 import org.apache.spark.sql.catalyst.plans.{Cross, FullOuter, Inner, JoinType, LeftAnti, LeftOuter, LeftSemi, RightOuter, UsingJoin}
 import org.apache.spark.sql.catalyst.plans.logical
-import org.apache.spark.sql.catalyst.plans.logical.{AppendColumns, Assignment, CoGroup, CollectMetrics, CommandResult, CompoundBody, Deduplicate, DeduplicateWithinWatermark, DeleteAction, DeserializeToObject, Except, FlatMapGroupsWithState, InsertAction, InsertStarAction, Intersect, JoinWith, LocalRelation, LogicalGroupState, LogicalPlan, MapGroups, MapPartitions, MergeAction, Project, Sample, SerializeFromObject, Sort, SubqueryAlias, TimeModes, TransformWithState, TypedFilter, Union, Unpivot, UnresolvedHint, UpdateAction, UpdateEventTimeWatermarkColumn, UpdateStarAction}
+import org.apache.spark.sql.catalyst.plans.logical.{AppendColumns, Assignment, CoGroup, CollectMetrics, CommandResult, Deduplicate, DeduplicateWithinWatermark, DeleteAction, DeserializeToObject, Except, FlatMapGroupsWithState, InsertAction, InsertStarAction, Intersect, JoinWith, LocalRelation, LogicalGroupState, LogicalPlan, MapGroups, MapPartitions, MergeAction, Project, Sample, SerializeFromObject, Sort, SubqueryAlias, TimeModes, TransformWithState, TypedFilter, Union, Unpivot, UnresolvedHint, UpdateAction, UpdateEventTimeWatermarkColumn, UpdateStarAction}
 import org.apache.spark.sql.catalyst.streaming.InternalOutputModes
 import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin, TreePattern}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
@@ -60,13 +59,13 @@ import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, CharVarcharUtils}
 import org.apache.spark.sql.classic.{Catalog, DataFrameWriter, Dataset, MergeIntoWriter, RelationalGroupedDataset, SparkSession, TypedAggUtils, UserDefinedFunctionUtils}
 import org.apache.spark.sql.classic.ClassicConversions._
 import org.apache.spark.sql.connect.client.arrow.ArrowSerializer
-import org.apache.spark.sql.connect.common.{DataTypeProtoConverter, ForeachWriterPacket, LiteralValueProtoConverter, StorageLevelProtoConverter, StreamingListenerPacket, UdfPacket}
+import org.apache.spark.sql.connect.common.{DataTypeProtoConverter, ForeachWriterPacket, InvalidPlanInput, LiteralValueProtoConverter, StorageLevelProtoConverter, StreamingListenerPacket, UdfPacket}
 import org.apache.spark.sql.connect.config.Connect.CONNECT_GRPC_ARROW_MAX_BATCH_SIZE
 import org.apache.spark.sql.connect.ml.MLHandler
 import org.apache.spark.sql.connect.pipelines.PipelinesHandler
 import org.apache.spark.sql.connect.plugin.SparkConnectPluginRegistry
 import org.apache.spark.sql.connect.service.{ExecuteHolder, SessionHolder, SparkConnectService}
-import org.apache.spark.sql.connect.utils.MetricGenerator
+import org.apache.spark.sql.connect.utils.{MetricGenerator, PipelineAnalysisContextUtils}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.execution.aggregate.{ScalaAggregator, TypedAggregateExpression}
@@ -196,6 +195,8 @@ class SparkConnectPlanner(
           transformWithWatermark(rel.getWithWatermark)
         case proto.Relation.RelTypeCase.CACHED_LOCAL_RELATION =>
           transformCachedLocalRelation(rel.getCachedLocalRelation)
+        case proto.Relation.RelTypeCase.CHUNKED_CACHED_LOCAL_RELATION =>
+          transformChunkedCachedLocalRelation(rel.getChunkedCachedLocalRelation)
         case proto.Relation.RelTypeCase.HINT => transformHint(rel.getHint)
         case proto.Relation.RelTypeCase.UNPIVOT => transformUnpivot(rel.getUnpivot)
         case proto.Relation.RelTypeCase.TRANSPOSE => transformTranspose(rel.getTranspose)
@@ -241,7 +242,7 @@ class SparkConnectPlanner(
     }
 
     if (executeHolderOpt.isDefined) {
-      plan.transformUpWithSubqueriesAndPruning(_.containsPattern(TreePattern.COLLECT_METRICS)) {
+      plan.foreachWithSubqueriesAndPruning(_.containsPattern(TreePattern.COLLECT_METRICS)) {
         case collectMetrics: CollectMetrics if !collectMetrics.child.isStreaming =>
           // TODO this might be too complex for no good reason. It might
           //  be easier to inspect the plan after it completes.
@@ -249,9 +250,10 @@ class SparkConnectPlanner(
             collectMetrics.name,
             collectMetrics.dataframeId)
           executeHolder.addObservation(collectMetrics.name, observation)
-          collectMetrics
+        case _ =>
       }
-    } else plan
+    }
+    plan
   }
 
   private def transformRelationPlugin(extension: ProtoAny): LogicalPlan = {
@@ -262,7 +264,7 @@ class SparkConnectPlanner(
       .map(p => p.transform(extension.toByteArray, this))
       // Find the first non-empty transformation or throw.
       .find(_.isPresent)
-      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension())
+      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension(extension.getTypeUrl))
       .get()
   }
 
@@ -688,7 +690,8 @@ class SparkConnectPlanner(
           .groupBy(cols: _*)
 
         pythonUdf.evalType match {
-          case PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF =>
+          case PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF |
+              PythonEvalType.SQL_GROUPED_MAP_PANDAS_ITER_UDF =>
             group.flatMapGroupsInPandas(Column(pythonUdf)).logicalPlan
 
           case PythonEvalType.SQL_GROUPED_MAP_ARROW_UDF |
@@ -1328,7 +1331,9 @@ class SparkConnectPlanner(
 
   private def transformCachedLocalRelation(rel: proto.CachedLocalRelation): LogicalPlan = {
     val blockManager = session.sparkContext.env.blockManager
-    val blockId = CacheId(sessionHolder.session.sessionUUID, rel.getHash)
+    val blockId = session.artifactManager.getCachedBlockId(rel.getHash).getOrElse {
+      throw InvalidPlanInput(s"Cannot find a cached local relation for hash: ${rel.getHash}")
+    }
     val bytes = blockManager.getLocalBytes(blockId)
     bytes
       .map { blockData =>
@@ -1440,7 +1445,8 @@ class SparkConnectPlanner(
         // so we call filter instead of find.
         val cols = allColumns.filter(col => resolver(col.name, colName))
         if (cols.isEmpty) {
-          throw InvalidInputErrors.invalidDeduplicateColumn(colName)
+          val fieldNames = allColumns.map(_.name).mkString(", ")
+          throw InvalidInputErrors.invalidDeduplicateColumn(colName, fieldNames)
         }
         cols
       }
@@ -1483,25 +1489,116 @@ class SparkConnectPlanner(
         rel.getSchema,
         parseDatatypeString,
         fallbackParser = DataType.fromJson)
-      schema = schemaType match {
-        case s: StructType => s
-        case d => StructType(Seq(StructField("value", d)))
-      }
+      schema = toStructTypeOrWrap(schemaType)
     }
 
     if (rel.hasData) {
-      val (rows, structType) =
-        ArrowConverters.fromIPCStream(rel.getData.toByteArray, TaskContext.get())
-      if (structType == null) {
-        throw InvalidInputErrors.inputDataForLocalRelationNoSchema()
+      val (rows, structType) = ArrowConverters.fromIPCStream(rel.getData.toByteArray)
+      try {
+        buildLocalRelationFromRows(rows, structType, Option(schema))
+      } finally {
+        rows.close()
       }
-      val attributes = DataTypeUtils.toAttributes(structType)
-      val proj = UnsafeProjection.create(attributes, attributes)
-      val data = rows.map(proj)
-
+    } else {
       if (schema == null) {
-        logical.LocalRelation(attributes, data.map(_.copy()).toSeq)
+        throw InvalidInputErrors.schemaRequiredForLocalRelation()
+      }
+      LocalRelation(schema)
+    }
+  }
+
+  private def readChunkedCachedLocalRelationBlock(hash: String): Array[Byte] = {
+    val blockManager = session.sparkContext.env.blockManager
+    val blockId = CacheId(sessionHolder.session.sessionUUID, hash)
+    val bytes = blockManager.getLocalBytes(blockId)
+    bytes
+      .map { blockData =>
+        try {
+          blockData.toInputStream().readAllBytes()
+        } finally {
+          blockManager.releaseLock(blockId)
+        }
+      }
+      .getOrElse {
+        throw InvalidInputErrors.notFoundChunkedCachedLocalRelationBlock(
+          blockId.hash,
+          blockId.sessionUUID)
+      }
+  }
+
+  private def getBlockSize(hash: String): Long = {
+    val blockManager = session.sparkContext.env.blockManager
+    val blockId = CacheId(sessionHolder.session.sessionUUID, hash)
+    blockManager.getStatus(blockId).map(status => status.memSize + status.diskSize).getOrElse(0L)
+  }
+
+  private def transformChunkedCachedLocalRelation(
+      rel: proto.ChunkedCachedLocalRelation): LogicalPlan = {
+    if (rel.getDataHashesCount == 0) {
+      throw InvalidInputErrors.chunkedCachedLocalRelationWithoutData()
+    }
+    val dataHashes = rel.getDataHashesList.asScala
+    val allHashes = dataHashes ++ (
+      if (rel.hasSchemaHash) {
+        Seq(rel.getSchemaHash)
       } else {
+        Seq.empty
+      }
+    )
+    val allSizes = allHashes.map(hash => getBlockSize(hash))
+    val totalSize = allSizes.sum
+
+    val relationSizeLimit = session.sessionState.conf.localRelationSizeLimit
+    val chunkSizeLimit = session.sessionState.conf.localRelationChunkSizeLimit
+    if (totalSize > relationSizeLimit) {
+      throw InvalidInputErrors.localRelationSizeLimitExceeded(totalSize, relationSizeLimit)
+    }
+    if (allSizes.exists(_ > chunkSizeLimit)) {
+      throw InvalidInputErrors.localRelationChunkSizeLimitExceeded(chunkSizeLimit)
+    }
+
+    var schema: StructType = null
+    if (rel.hasSchemaHash) {
+      val schemaBytes = readChunkedCachedLocalRelationBlock(rel.getSchemaHash)
+      val schemaString = new String(schemaBytes)
+      val schemaType = DataType.parseTypeWithFallback(
+        schemaString,
+        parseDatatypeString,
+        fallbackParser = DataType.fromJson)
+      schema = toStructTypeOrWrap(schemaType)
+    }
+
+    // Load and combine all batches
+    val (rows, structType) =
+      ArrowConverters.fromIPCStream(dataHashes.iterator.map(readChunkedCachedLocalRelationBlock))
+    try {
+      buildLocalRelationFromRows(rows, structType, Option(schema))
+    } finally {
+      rows.close()
+    }
+  }
+
+  private def toStructTypeOrWrap(dt: DataType): StructType = dt match {
+    case s: StructType => s
+    case d => StructType(Seq(StructField("value", d)))
+  }
+
+  private def buildLocalRelationFromRows(
+      rows: Iterator[InternalRow],
+      structType: StructType,
+      schemaOpt: Option[StructType]): LogicalPlan = {
+    if (structType == null) {
+      throw InvalidInputErrors.inputDataForLocalRelationNoSchema()
+    }
+
+    val attributes = DataTypeUtils.toAttributes(structType)
+    val initialProjection = UnsafeProjection.create(attributes, attributes)
+    val data = rows.map(initialProjection)
+
+    schemaOpt match {
+      case None =>
+        logical.LocalRelation(attributes, data.map(_.copy()).toArray.toImmutableArraySeq)
+      case Some(schema) =>
         def normalize(dt: DataType): DataType = dt match {
           case udt: UserDefinedType[_] => normalize(udt.sqlType)
           case StructType(fields) =>
@@ -1533,12 +1630,6 @@ class SparkConnectPlanner(
         logical.LocalRelation(
           DataTypeUtils.toAttributes(schema),
           data.map(proj).map(_.copy()).toSeq)
-      }
-    } else {
-      if (schema == null) {
-        throw InvalidInputErrors.schemaRequiredForLocalRelation()
-      }
-      LocalRelation(schema)
     }
   }
 
@@ -1606,6 +1697,9 @@ class SparkConnectPlanner(
         reader.options(streamSource.getOptionsMap.asScala)
         if (streamSource.getSchema.nonEmpty) {
           reader.schema(parseSchema(streamSource.getSchema))
+        }
+        if (streamSource.hasSourceName) {
+          reader.name(streamSource.getSourceName)
         }
         val streamDF = streamSource.getPathsCount match {
           case 0 => reader.load()
@@ -1855,7 +1949,7 @@ class SparkConnectPlanner(
       .map(p => p.transform(extension.toByteArray, this))
       // Find the first non-empty transformation or throw.
       .find(_.isPresent)
-      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension())
+      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension(extension.getTypeUrl))
       .get
   }
 
@@ -1972,7 +2066,7 @@ class SparkConnectPlanner(
       Utils.deserialize[T](fun.getPayload.toByteArray, Utils.getContextOrSparkClassLoader)
     } catch {
       case t: Throwable =>
-        Throwables.getRootCause(t) match {
+        Utils.getRootCause(t) match {
           case nsm: NoSuchMethodException =>
             throw new SparkClassNotFoundException(
               "INTERNAL_ERROR",
@@ -2844,6 +2938,10 @@ class SparkConnectPlanner(
       command: SqlCommand,
       responseObserver: StreamObserver[ExecutePlanResponse]): Unit = {
     val tracker = executeHolder.eventsManager.createQueryPlanningTracker()
+    val userContext = executeHolder.request.getUserContext
+    // To avoid explicit handling of the result on the client, we build the expected input
+    // of the relation on the server. The client has to simply forward the result.
+    val result = SqlCommandResult.newBuilder()
 
     val relation = if (command.hasInput) {
       command.getInput
@@ -2863,6 +2961,26 @@ class SparkConnectPlanner(
         .build()
     }
 
+    // Block unsupported SQL commands if the request comes from Spark Declarative Pipelines.
+    if (PipelineAnalysisContextUtils.hasPipelineAnalysisContext(userContext)) {
+      PipelinesHandler.blockUnsupportedSqlCommand(queryPlan = transformRelation(relation))
+    }
+
+    // If the spark.sql() is called inside a pipeline flow function, we don't need to execute
+    // the SQL command and defer the actual analysis and execution to the flow function.
+    if (PipelineAnalysisContextUtils.isInsidePipelineFlowFunction(userContext)) {
+      result.setRelation(relation)
+      executeHolder.eventsManager.postFinished()
+      responseObserver.onNext(
+        ExecutePlanResponse
+          .newBuilder()
+          .setSessionId(sessionHolder.sessionId)
+          .setServerSideSessionId(sessionHolder.serverSessionId)
+          .setSqlCommandResult(result)
+          .build)
+      return
+    }
+
     val df = relation.getRelTypeCase match {
       case proto.Relation.RelTypeCase.SQL =>
         executeSQL(relation.getSql, tracker)
@@ -2874,16 +2992,13 @@ class SparkConnectPlanner(
 
     // Check if command or SQL Script has been executed.
     val isCommand = df.queryExecution.commandExecuted.isInstanceOf[CommandResult]
-    val isSqlScript = df.queryExecution.logical.isInstanceOf[CompoundBody]
+    val isSqlScript = df.queryExecution.isSqlScript
     val rows = df.logicalPlan match {
       case lr: LocalRelation => lr.data
       case cr: CommandResult => cr.rows
       case _ => Seq.empty
     }
 
-    // To avoid explicit handling of the result on the client, we build the expected input
-    // of the relation on the server. The client has to simply forward the result.
-    val result = SqlCommandResult.newBuilder()
     // Only filled when isCommand
     val metrics = ExecutePlanResponse.Metrics.newBuilder()
     if (isCommand || isSqlScript) {
@@ -3116,7 +3231,7 @@ class SparkConnectPlanner(
       .map(p => p.process(extension.toByteArray, this))
       // Find the first non-empty transformation or throw.
       .find(_ == true)
-      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension())
+      .getOrElse(throw InvalidInputErrors.noHandlerFoundForExtension(extension.getTypeUrl))
     executeHolder.eventsManager.postFinished()
   }
 
@@ -3322,6 +3437,8 @@ class SparkConnectPlanner(
         writer.trigger(Trigger.Once())
       case TriggerCase.CONTINUOUS_CHECKPOINT_INTERVAL =>
         writer.trigger(Trigger.Continuous(writeOp.getContinuousCheckpointInterval))
+      case TriggerCase.REAL_TIME_BATCH_DURATION =>
+        writer.trigger(Trigger.RealTime(writeOp.getRealTimeBatchDuration))
       case TriggerCase.TRIGGER_NOT_SET =>
     }
 

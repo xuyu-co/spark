@@ -20,6 +20,7 @@ package org.apache.spark.sql.connect.execution
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.jdk.CollectionConverters._
+import scala.util.{Success, Try}
 import scala.util.control.NonFatal
 
 import com.google.protobuf.Message
@@ -33,6 +34,7 @@ import org.apache.spark.sql.connect.service.{ExecuteHolder, ExecuteSessionTag, S
 import org.apache.spark.sql.connect.utils.ErrorUtils
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.util.Utils
+import org.apache.spark.util.Utils.CONNECT_EXECUTE_THREAD_PREFIX
 
 /**
  * This class launches the actual execution in an execution thread. The execution pushes the
@@ -228,22 +230,20 @@ private[connect] class ExecuteThreadRunner(executeHolder: ExecuteHolder) extends
             executeHolder.request.getPlan.getDescriptorForType)
       }
 
-      val observedMetrics: Map[String, Seq[(Option[String], Any, Option[DataType])]] = {
+      val observedMetrics: Map[String, Try[Seq[(Option[String], Any, Option[DataType])]]] = {
         executeHolder.observations.map { case (name, observation) =>
-          val values =
-            observation.getRowOrEmpty
-              .map(SparkConnectPlanExecution.toObservedMetricsValues(_))
-              .getOrElse(Seq.empty)
-          name -> values
+          name -> observation.future.value
+            .map(_.map(SparkConnectPlanExecution.toObservedMetricsValues))
+            .getOrElse(Success(Seq.empty))
         }.toMap
       }
-      val accumulatedInPython: Map[String, Seq[(Option[String], Any, Option[DataType])]] = {
+      val accumulatedInPython: Map[String, Try[Seq[(Option[String], Any, Option[DataType])]]] = {
         executeHolder.sessionHolder.pythonAccumulator.flatMap { accumulator =>
           accumulator.synchronized {
             val value = accumulator.value.asScala.toSeq
             if (value.nonEmpty) {
               accumulator.reset()
-              Some("__python_accumulator__" -> value.map(value => (None, value, None)))
+              Some("__python_accumulator__" -> Success(value.map(value => (None, value, None))))
             } else {
               None
             }
@@ -329,7 +329,7 @@ private[connect] class ExecuteThreadRunner(executeHolder: ExecuteHolder) extends
   }
 
   private class ExecutionThread()
-      extends Thread(s"SparkConnectExecuteThread_opId=${executeHolder.operationId}") {
+      extends Thread(s"${CONNECT_EXECUTE_THREAD_PREFIX}_opId=${executeHolder.operationId}") {
     override def run(): Unit = execute()
   }
 }

@@ -134,10 +134,10 @@ def determine_modules_to_test(changed_modules, deduplicated=True):
     ... # doctest: +NORMALIZE_WHITESPACE
     ['avro', 'catalyst', 'connect', 'core', 'docker-integration-tests', 'examples', 'graphx',
      'hive', 'hive-thriftserver', 'mllib', 'mllib-local', 'protobuf', 'pyspark-connect',
-     'pyspark-core', 'pyspark-ml', 'pyspark-ml-connect', 'pyspark-mllib', 'pyspark-pandas',
-     'pyspark-pandas-connect', 'pyspark-pandas-slow', 'pyspark-pandas-slow-connect',
-     'pyspark-pipelines', 'pyspark-resource', 'pyspark-sql', 'pyspark-streaming',
-     'pyspark-structured-streaming', 'pyspark-structured-streaming-connect',
+     'pyspark-core', 'pyspark-install', 'pyspark-ml', 'pyspark-ml-connect', 'pyspark-mllib',
+     'pyspark-pandas', 'pyspark-pandas-connect', 'pyspark-pandas-slow',
+     'pyspark-pandas-slow-connect', 'pyspark-pipelines', 'pyspark-resource', 'pyspark-sql',
+     'pyspark-streaming', 'pyspark-structured-streaming', 'pyspark-structured-streaming-connect',
      'pyspark-testing', 'repl', 'root', 'sparkr', 'sql', 'sql-kafka-0-10', 'streaming',
      'streaming-kafka-0-10', 'streaming-kinesis-asl']
     """
@@ -157,6 +157,18 @@ def determine_modules_to_test(changed_modules, deduplicated=True):
     return toposort_flatten(
         {m: set(m.dependencies).intersection(modules_to_test) for m in modules_to_test}, sort=True
     )
+
+
+def determine_dangling_python_tests(changed_files):
+    """
+    Given a list of changed files, return the set of Python tests that are not associated with any
+    module.
+    """
+    dangling_tests = set()
+    for filename in changed_files:
+        if os.path.exists(filename) and modules.root.missing_potential_python_test(filename):
+            dangling_tests.add(filename)
+    return dangling_tests
 
 
 def determine_tags_to_exclude(changed_modules):

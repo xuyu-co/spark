@@ -31,6 +31,7 @@ import org.apache.spark.sql.connector.catalog.TableWritePrivilege
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.types.{DataType, Metadata, StructType}
 import org.apache.spark.sql.util.{CaseInsensitiveStringMap, SchemaUtils}
+import org.apache.spark.unsafe.types.CalendarInterval
 import org.apache.spark.util.ArrayImplicits._
 
 /**
@@ -176,6 +177,8 @@ case class UnresolvedInlineTable(
     names: Seq[String],
     rows: Seq[Seq[Expression]])
   extends UnresolvedLeafNode {
+
+  final override val nodePatterns: Seq[TreePattern] = Seq(INLINE_TABLE_EVAL)
 
   lazy val expressionsResolved: Boolean = rows.forall(_.forall(_.resolved))
 }
@@ -368,7 +371,7 @@ case class UnresolvedFunction(
     arguments: Seq[Expression],
     isDistinct: Boolean,
     filter: Option[Expression] = None,
-    ignoreNulls: Boolean = false,
+    ignoreNulls: Option[Boolean] = None,
     orderingWithinGroup: Seq[SortOrder] = Seq.empty,
     isInternal: Boolean = false)
   extends Expression with Unevaluable {
@@ -1227,4 +1230,16 @@ case class UnresolvedExecuteImmediate(
   extends UnresolvedLeafNode with SupportsSubquery {
 
   final override val nodePatterns: Seq[TreePattern] = Seq(EXECUTE_IMMEDIATE)
+}
+
+case class UnresolvedEventTimeWatermark(
+    eventTimeColExpr: NamedExpression,
+    delay: CalendarInterval,
+    child: LogicalPlan)
+  extends UnresolvedUnaryNode {
+
+  final override val nodePatterns: Seq[TreePattern] = Seq(UNRESOLVED_EVENT_TIME_WATERMARK)
+
+  override protected def withNewChildInternal(
+      newChild: LogicalPlan): UnresolvedEventTimeWatermark = copy(child = newChild)
 }

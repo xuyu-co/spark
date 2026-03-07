@@ -38,7 +38,7 @@ from pyspark.pandas.exceptions import PandasNotImplementedError
 MAX_MISSING_PARAMS_SIZE = 5
 COMMON_PARAMETER_SET = {"kwargs", "args", "cls"}
 MODULE_GROUP_MATCH = [(pd, ps), (pdw, psw), (pdg, psg)]
-PANDAS_LATEST_VERSION = "2.3.2"
+PANDAS_LATEST_VERSION = "2.3.3"
 
 RST_HEADER = """
 =====================
@@ -397,7 +397,7 @@ def _escape_func_str(func_str: str) -> str:
     # TODO: Take into account that this function can create links incorrectly
     # We can create alias links or links to parent methods
     if func_str.endswith("_"):
-        return func_str[:-1] + "\_"  # noqa: W605
+        return func_str[:-1] + "\\_"
     else:
         return func_str
 

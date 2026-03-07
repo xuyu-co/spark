@@ -57,42 +57,123 @@ else:
 
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
 
+class _CompressionCodec:
+    ValueType = typing.NewType("ValueType", builtins.int)
+    V: typing_extensions.TypeAlias = ValueType
+
+class _CompressionCodecEnumTypeWrapper(
+    google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[_CompressionCodec.ValueType],
+    builtins.type,
+):  # noqa: F821
+    DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+    COMPRESSION_CODEC_UNSPECIFIED: _CompressionCodec.ValueType  # 0
+    COMPRESSION_CODEC_ZSTD: _CompressionCodec.ValueType  # 1
+
+class CompressionCodec(_CompressionCodec, metaclass=_CompressionCodecEnumTypeWrapper):
+    """Compression codec for plan compression."""
+
+COMPRESSION_CODEC_UNSPECIFIED: CompressionCodec.ValueType  # 0
+COMPRESSION_CODEC_ZSTD: CompressionCodec.ValueType  # 1
+global___CompressionCodec = CompressionCodec
+
 class Plan(google.protobuf.message.Message):
     """A [[Plan]] is the structure that carries the runtime information for the execution from the
-    client to the server. A [[Plan]] can either be of the type [[Relation]] which is a reference
-    to the underlying logical plan or it can be of the [[Command]] type that is used to execute
-    commands on the server.
+    client to the server. A [[Plan]] can be one of the following:
+    - [[Relation]]: a reference to the underlying logical plan.
+    - [[Command]]: used to execute commands on the server.
+    - [[CompressedOperation]]: a compressed representation of either a Relation or a Command.
     """
 
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
+    class CompressedOperation(google.protobuf.message.Message):
+        DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+        class _OpType:
+            ValueType = typing.NewType("ValueType", builtins.int)
+            V: typing_extensions.TypeAlias = ValueType
+
+        class _OpTypeEnumTypeWrapper(
+            google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+                Plan.CompressedOperation._OpType.ValueType
+            ],
+            builtins.type,
+        ):  # noqa: F821
+            DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+            OP_TYPE_UNSPECIFIED: Plan.CompressedOperation._OpType.ValueType  # 0
+            OP_TYPE_RELATION: Plan.CompressedOperation._OpType.ValueType  # 1
+            OP_TYPE_COMMAND: Plan.CompressedOperation._OpType.ValueType  # 2
+
+        class OpType(_OpType, metaclass=_OpTypeEnumTypeWrapper): ...
+        OP_TYPE_UNSPECIFIED: Plan.CompressedOperation.OpType.ValueType  # 0
+        OP_TYPE_RELATION: Plan.CompressedOperation.OpType.ValueType  # 1
+        OP_TYPE_COMMAND: Plan.CompressedOperation.OpType.ValueType  # 2
+
+        DATA_FIELD_NUMBER: builtins.int
+        OP_TYPE_FIELD_NUMBER: builtins.int
+        COMPRESSION_CODEC_FIELD_NUMBER: builtins.int
+        data: builtins.bytes
+        op_type: global___Plan.CompressedOperation.OpType.ValueType
+        compression_codec: global___CompressionCodec.ValueType
+        def __init__(
+            self,
+            *,
+            data: builtins.bytes = ...,
+            op_type: global___Plan.CompressedOperation.OpType.ValueType = ...,
+            compression_codec: global___CompressionCodec.ValueType = ...,
+        ) -> None: ...
+        def ClearField(
+            self,
+            field_name: typing_extensions.Literal[
+                "compression_codec", b"compression_codec", "data", b"data", "op_type", b"op_type"
+            ],
+        ) -> None: ...
+
     ROOT_FIELD_NUMBER: builtins.int
     COMMAND_FIELD_NUMBER: builtins.int
+    COMPRESSED_OPERATION_FIELD_NUMBER: builtins.int
     @property
     def root(self) -> pyspark.sql.connect.proto.relations_pb2.Relation: ...
     @property
     def command(self) -> pyspark.sql.connect.proto.commands_pb2.Command: ...
+    @property
+    def compressed_operation(self) -> global___Plan.CompressedOperation: ...
     def __init__(
         self,
         *,
         root: pyspark.sql.connect.proto.relations_pb2.Relation | None = ...,
         command: pyspark.sql.connect.proto.commands_pb2.Command | None = ...,
+        compressed_operation: global___Plan.CompressedOperation | None = ...,
     ) -> None: ...
     def HasField(
         self,
         field_name: typing_extensions.Literal[
-            "command", b"command", "op_type", b"op_type", "root", b"root"
+            "command",
+            b"command",
+            "compressed_operation",
+            b"compressed_operation",
+            "op_type",
+            b"op_type",
+            "root",
+            b"root",
         ],
     ) -> builtins.bool: ...
     def ClearField(
         self,
         field_name: typing_extensions.Literal[
-            "command", b"command", "op_type", b"op_type", "root", b"root"
+            "command",
+            b"command",
+            "compressed_operation",
+            b"compressed_operation",
+            "op_type",
+            b"op_type",
+            "root",
+            b"root",
         ],
     ) -> None: ...
     def WhichOneof(
         self, oneof_group: typing_extensions.Literal["op_type", b"op_type"]
-    ) -> typing_extensions.Literal["root", "command"] | None: ...
+    ) -> typing_extensions.Literal["root", "command", "compressed_operation"] | None: ...
 
 global___Plan = Plan
 
@@ -1507,6 +1588,8 @@ class ExecutePlanResponse(google.protobuf.message.Message):
         VALUES_FIELD_NUMBER: builtins.int
         KEYS_FIELD_NUMBER: builtins.int
         PLAN_ID_FIELD_NUMBER: builtins.int
+        ROOT_ERROR_IDX_FIELD_NUMBER: builtins.int
+        ERRORS_FIELD_NUMBER: builtins.int
         name: builtins.str
         @property
         def values(
@@ -1519,6 +1602,19 @@ class ExecutePlanResponse(google.protobuf.message.Message):
             self,
         ) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[builtins.str]: ...
         plan_id: builtins.int
+        root_error_idx: builtins.int
+        """(Optional) The index of the root error in errors.
+        The field will not be set if there are no errors.
+        """
+        @property
+        def errors(
+            self,
+        ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+            global___FetchErrorDetailsResponse.Error
+        ]:
+            """A list of errors that occurred while collecting the observed metrics.
+            If the length is 0, it means no errors occurred.
+            """
         def __init__(
             self,
             *,
@@ -1529,13 +1625,37 @@ class ExecutePlanResponse(google.protobuf.message.Message):
             | None = ...,
             keys: collections.abc.Iterable[builtins.str] | None = ...,
             plan_id: builtins.int = ...,
+            root_error_idx: builtins.int | None = ...,
+            errors: collections.abc.Iterable[global___FetchErrorDetailsResponse.Error] | None = ...,
         ) -> None: ...
+        def HasField(
+            self,
+            field_name: typing_extensions.Literal[
+                "_root_error_idx", b"_root_error_idx", "root_error_idx", b"root_error_idx"
+            ],
+        ) -> builtins.bool: ...
         def ClearField(
             self,
             field_name: typing_extensions.Literal[
-                "keys", b"keys", "name", b"name", "plan_id", b"plan_id", "values", b"values"
+                "_root_error_idx",
+                b"_root_error_idx",
+                "errors",
+                b"errors",
+                "keys",
+                b"keys",
+                "name",
+                b"name",
+                "plan_id",
+                b"plan_id",
+                "root_error_idx",
+                b"root_error_idx",
+                "values",
+                b"values",
             ],
         ) -> None: ...
+        def WhichOneof(
+            self, oneof_group: typing_extensions.Literal["_root_error_idx", b"_root_error_idx"]
+        ) -> typing_extensions.Literal["root_error_idx"] | None: ...
 
     class ResultComplete(google.protobuf.message.Message):
         """If present, in a reattachable execution this means that after server sends onComplete,
@@ -4230,3 +4350,270 @@ class CloneSessionResponse(google.protobuf.message.Message):
     ) -> None: ...
 
 global___CloneSessionResponse = CloneSessionResponse
+
+class GetStatusRequest(google.protobuf.message.Message):
+    """Next ID: 6"""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    class OperationStatusRequest(google.protobuf.message.Message):
+        DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+        OPERATION_IDS_FIELD_NUMBER: builtins.int
+        EXTENSIONS_FIELD_NUMBER: builtins.int
+        @property
+        def operation_ids(
+            self,
+        ) -> google.protobuf.internal.containers.RepeatedScalarFieldContainer[builtins.str]:
+            """Get status of operations with these operation_ids.
+            If unset or empty, returns status of all operations in the session.
+            """
+        @property
+        def extensions(
+            self,
+        ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+            google.protobuf.any_pb2.Any
+        ]:
+            """Extension point for custom operation-level status requests."""
+        def __init__(
+            self,
+            *,
+            operation_ids: collections.abc.Iterable[builtins.str] | None = ...,
+            extensions: collections.abc.Iterable[google.protobuf.any_pb2.Any] | None = ...,
+        ) -> None: ...
+        def ClearField(
+            self,
+            field_name: typing_extensions.Literal[
+                "extensions", b"extensions", "operation_ids", b"operation_ids"
+            ],
+        ) -> None: ...
+
+    SESSION_ID_FIELD_NUMBER: builtins.int
+    USER_CONTEXT_FIELD_NUMBER: builtins.int
+    CLIENT_TYPE_FIELD_NUMBER: builtins.int
+    CLIENT_OBSERVED_SERVER_SIDE_SESSION_ID_FIELD_NUMBER: builtins.int
+    OPERATION_STATUS_FIELD_NUMBER: builtins.int
+    EXTENSIONS_FIELD_NUMBER: builtins.int
+    session_id: builtins.str
+    """(Required)
+
+    The session_id specifies a Spark session for a user identified by user_context.user_id.
+    The id should be an UUID string of the format `00112233-4455-6677-8899-aabbccddeeff`
+    """
+    @property
+    def user_context(self) -> global___UserContext:
+        """(Required)
+
+        user_context.user_id and session_id both identify a unique remote spark session on the
+        server side.
+        """
+    client_type: builtins.str
+    """(Optional)
+
+    Provides optional information about the client sending the request. This field
+    can be used for language or version specific information and is only intended for
+    logging purposes and will not be interpreted by the server.
+    """
+    client_observed_server_side_session_id: builtins.str
+    """(Optional)
+
+    Server-side generated idempotency key from the previous responses (if any). Server
+    can use this to validate that the server side session has not changed.
+    """
+    @property
+    def operation_status(self) -> global___GetStatusRequest.OperationStatusRequest:
+        """(Optional)
+
+        Get status of operations in the session.
+        """
+    @property
+    def extensions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        google.protobuf.any_pb2.Any
+    ]:
+        """Extension point for custom status request types."""
+    def __init__(
+        self,
+        *,
+        session_id: builtins.str = ...,
+        user_context: global___UserContext | None = ...,
+        client_type: builtins.str | None = ...,
+        client_observed_server_side_session_id: builtins.str | None = ...,
+        operation_status: global___GetStatusRequest.OperationStatusRequest | None = ...,
+        extensions: collections.abc.Iterable[google.protobuf.any_pb2.Any] | None = ...,
+    ) -> None: ...
+    def HasField(
+        self,
+        field_name: typing_extensions.Literal[
+            "_client_observed_server_side_session_id",
+            b"_client_observed_server_side_session_id",
+            "_client_type",
+            b"_client_type",
+            "_operation_status",
+            b"_operation_status",
+            "client_observed_server_side_session_id",
+            b"client_observed_server_side_session_id",
+            "client_type",
+            b"client_type",
+            "operation_status",
+            b"operation_status",
+            "user_context",
+            b"user_context",
+        ],
+    ) -> builtins.bool: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "_client_observed_server_side_session_id",
+            b"_client_observed_server_side_session_id",
+            "_client_type",
+            b"_client_type",
+            "_operation_status",
+            b"_operation_status",
+            "client_observed_server_side_session_id",
+            b"client_observed_server_side_session_id",
+            "client_type",
+            b"client_type",
+            "extensions",
+            b"extensions",
+            "operation_status",
+            b"operation_status",
+            "session_id",
+            b"session_id",
+            "user_context",
+            b"user_context",
+        ],
+    ) -> None: ...
+    @typing.overload
+    def WhichOneof(
+        self,
+        oneof_group: typing_extensions.Literal[
+            "_client_observed_server_side_session_id", b"_client_observed_server_side_session_id"
+        ],
+    ) -> typing_extensions.Literal["client_observed_server_side_session_id"] | None: ...
+    @typing.overload
+    def WhichOneof(
+        self, oneof_group: typing_extensions.Literal["_client_type", b"_client_type"]
+    ) -> typing_extensions.Literal["client_type"] | None: ...
+    @typing.overload
+    def WhichOneof(
+        self, oneof_group: typing_extensions.Literal["_operation_status", b"_operation_status"]
+    ) -> typing_extensions.Literal["operation_status"] | None: ...
+
+global___GetStatusRequest = GetStatusRequest
+
+class GetStatusResponse(google.protobuf.message.Message):
+    """Next ID: 4"""
+
+    DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+    class OperationStatus(google.protobuf.message.Message):
+        """Status information for a single operation."""
+
+        DESCRIPTOR: google.protobuf.descriptor.Descriptor
+
+        class _OperationState:
+            ValueType = typing.NewType("ValueType", builtins.int)
+            V: typing_extensions.TypeAlias = ValueType
+
+        class _OperationStateEnumTypeWrapper(
+            google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
+                GetStatusResponse.OperationStatus._OperationState.ValueType
+            ],
+            builtins.type,
+        ):  # noqa: F821
+            DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
+            OPERATION_STATE_UNSPECIFIED: GetStatusResponse.OperationStatus._OperationState.ValueType  # 0
+            OPERATION_STATE_UNKNOWN: GetStatusResponse.OperationStatus._OperationState.ValueType  # 1
+            OPERATION_STATE_RUNNING: GetStatusResponse.OperationStatus._OperationState.ValueType  # 2
+            OPERATION_STATE_TERMINATING: GetStatusResponse.OperationStatus._OperationState.ValueType  # 3
+            OPERATION_STATE_SUCCEEDED: GetStatusResponse.OperationStatus._OperationState.ValueType  # 4
+            OPERATION_STATE_FAILED: GetStatusResponse.OperationStatus._OperationState.ValueType  # 5
+            OPERATION_STATE_CANCELLED: GetStatusResponse.OperationStatus._OperationState.ValueType  # 6
+
+        class OperationState(_OperationState, metaclass=_OperationStateEnumTypeWrapper): ...
+        OPERATION_STATE_UNSPECIFIED: GetStatusResponse.OperationStatus.OperationState.ValueType  # 0
+        OPERATION_STATE_UNKNOWN: GetStatusResponse.OperationStatus.OperationState.ValueType  # 1
+        OPERATION_STATE_RUNNING: GetStatusResponse.OperationStatus.OperationState.ValueType  # 2
+        OPERATION_STATE_TERMINATING: GetStatusResponse.OperationStatus.OperationState.ValueType  # 3
+        OPERATION_STATE_SUCCEEDED: GetStatusResponse.OperationStatus.OperationState.ValueType  # 4
+        OPERATION_STATE_FAILED: GetStatusResponse.OperationStatus.OperationState.ValueType  # 5
+        OPERATION_STATE_CANCELLED: GetStatusResponse.OperationStatus.OperationState.ValueType  # 6
+
+        OPERATION_ID_FIELD_NUMBER: builtins.int
+        STATE_FIELD_NUMBER: builtins.int
+        EXTENSIONS_FIELD_NUMBER: builtins.int
+        operation_id: builtins.str
+        """The operation_id of the operation."""
+        state: global___GetStatusResponse.OperationStatus.OperationState.ValueType
+        """The current status of the operation."""
+        @property
+        def extensions(
+            self,
+        ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+            google.protobuf.any_pb2.Any
+        ]:
+            """Extension point for custom operation-level status fields."""
+        def __init__(
+            self,
+            *,
+            operation_id: builtins.str = ...,
+            state: global___GetStatusResponse.OperationStatus.OperationState.ValueType = ...,
+            extensions: collections.abc.Iterable[google.protobuf.any_pb2.Any] | None = ...,
+        ) -> None: ...
+        def ClearField(
+            self,
+            field_name: typing_extensions.Literal[
+                "extensions", b"extensions", "operation_id", b"operation_id", "state", b"state"
+            ],
+        ) -> None: ...
+
+    SESSION_ID_FIELD_NUMBER: builtins.int
+    SERVER_SIDE_SESSION_ID_FIELD_NUMBER: builtins.int
+    OPERATION_STATUSES_FIELD_NUMBER: builtins.int
+    EXTENSIONS_FIELD_NUMBER: builtins.int
+    session_id: builtins.str
+    """Session id of the session for which the status was requested."""
+    server_side_session_id: builtins.str
+    """Server-side generated idempotency key that the client can use to assert that the server side
+    session has not changed.
+    """
+    @property
+    def operation_statuses(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        global___GetStatusResponse.OperationStatus
+    ]:
+        """Status information about requested operations."""
+    @property
+    def extensions(
+        self,
+    ) -> google.protobuf.internal.containers.RepeatedCompositeFieldContainer[
+        google.protobuf.any_pb2.Any
+    ]:
+        """Extension point for custom status response types."""
+    def __init__(
+        self,
+        *,
+        session_id: builtins.str = ...,
+        server_side_session_id: builtins.str = ...,
+        operation_statuses: collections.abc.Iterable[global___GetStatusResponse.OperationStatus]
+        | None = ...,
+        extensions: collections.abc.Iterable[google.protobuf.any_pb2.Any] | None = ...,
+    ) -> None: ...
+    def ClearField(
+        self,
+        field_name: typing_extensions.Literal[
+            "extensions",
+            b"extensions",
+            "operation_statuses",
+            b"operation_statuses",
+            "server_side_session_id",
+            b"server_side_session_id",
+            "session_id",
+            b"session_id",
+        ],
+    ) -> None: ...
+
+global___GetStatusResponse = GetStatusResponse

@@ -17,14 +17,11 @@
 
 package org.apache.spark.sql.catalyst.expressions
 
-import org.apache.datasketches.frequencies.ItemsSketch
-import org.apache.datasketches.memory.Memory
-
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.FunctionRegistry
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult
 import org.apache.spark.sql.catalyst.analysis.TypeCheckResult.{TypeCheckFailure, TypeCheckSuccess}
-import org.apache.spark.sql.catalyst.expressions.aggregate.ApproxTopK
+import org.apache.spark.sql.catalyst.expressions.aggregate.{ApproxTopK, ApproxTopKAggregateBuffer}
 import org.apache.spark.sql.catalyst.expressions.codegen.CodegenFallback
 import org.apache.spark.sql.types._
 
@@ -53,7 +50,7 @@ import org.apache.spark.sql.types._
       > SELECT _FUNC_(approx_top_k_accumulate(expr), 2) FROM VALUES 'a', 'b', 'c', 'c', 'c', 'c', 'd', 'd' tab(expr);
        [{"item":"c","count":4},{"item":"d","count":2}]
   """,
-  group = "misc_funcs",
+  group = "sketch_funcs",
   since = "4.1.0")
 // scalastyle:on line.size.limit
 case class ApproxTopKEstimate(state: Expression, k: Expression)
@@ -105,9 +102,10 @@ case class ApproxTopKEstimate(state: Expression, k: Expression)
     val kVal = kEval.asInstanceOf[Int]
     ApproxTopK.checkK(kVal)
     ApproxTopK.checkMaxItemsTracked(maxItemsTrackedVal, kVal)
-    val itemsSketch = ItemsSketch.getInstance(
-      Memory.wrap(dataSketchBytes), ApproxTopK.genSketchSerDe(itemDataType))
-    ApproxTopK.genEvalResult(itemsSketch, kVal, itemDataType)
+    val approxTopKAggregateBuffer = ApproxTopKAggregateBuffer.deserialize(
+      dataSketchBytes,
+      ApproxTopK.genSketchSerDe(itemDataType))
+    approxTopKAggregateBuffer.eval(kVal, itemDataType)
   }
 
   override protected def withNewChildrenInternal(newState: Expression, newK: Expression)

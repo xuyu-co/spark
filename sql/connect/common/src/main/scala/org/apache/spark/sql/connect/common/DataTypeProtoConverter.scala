@@ -71,6 +71,21 @@ object DataTypeProtoConverter {
       case proto.DataType.KindCase.MAP => toCatalystMapType(t.getMap)
       case proto.DataType.KindCase.VARIANT => VariantType
 
+      case proto.DataType.KindCase.GEOMETRY =>
+        val srid = t.getGeometry.getSrid
+        if (srid == GeometryType.MIXED_SRID) {
+          GeometryType("ANY")
+        } else {
+          GeometryType(srid)
+        }
+      case proto.DataType.KindCase.GEOGRAPHY =>
+        val srid = t.getGeography.getSrid
+        if (srid == GeographyType.MIXED_SRID) {
+          GeographyType("ANY")
+        } else {
+          GeographyType(srid)
+        }
+
       case proto.DataType.KindCase.UDT => toCatalystUDT(t.getUdt)
 
       case _ =>
@@ -87,7 +102,7 @@ object DataTypeProtoConverter {
   }
 
   private def toCatalystStringType(t: proto.DataType.String): StringType =
-    StringType(if (t.getCollation.nonEmpty) t.getCollation else "UTF8_BINARY")
+    if (t.getCollation.nonEmpty) StringType(t.getCollation) else StringType
 
   private def toCatalystYearMonthIntervalType(t: proto.DataType.YearMonthInterval) = {
     (t.hasStartField, t.hasEndField) match {
@@ -185,27 +200,29 @@ object DataTypeProtoConverter {
             proto.DataType.Decimal.newBuilder().setPrecision(precision).setScale(scale).build())
           .build()
 
-      case CharType(length) =>
+      case c: CharType =>
         proto.DataType
           .newBuilder()
-          .setChar(proto.DataType.Char.newBuilder().setLength(length).build())
+          .setChar(proto.DataType.Char.newBuilder().setLength(c.length).build())
           .build()
 
-      case VarcharType(length) =>
+      case v: VarcharType =>
         proto.DataType
           .newBuilder()
-          .setVarChar(proto.DataType.VarChar.newBuilder().setLength(length).build())
+          .setVarChar(proto.DataType.VarChar.newBuilder().setLength(v.length).build())
           .build()
 
       // StringType must be matched after CharType and VarcharType
       case s: StringType =>
+        val stringBuilder = proto.DataType.String.newBuilder()
+        // Send collation only for explicit collations (including explicit UTF8_BINARY).
+        // Default STRING (case object) has no explicit collation and should omit it.
+        if (!s.eq(StringType)) {
+          stringBuilder.setCollation(CollationFactory.fetchCollation(s.collationId).collationName)
+        }
         proto.DataType
           .newBuilder()
-          .setString(
-            proto.DataType.String
-              .newBuilder()
-              .setCollation(CollationFactory.fetchCollation(s.collationId).collationName)
-              .build())
+          .setString(stringBuilder.build())
           .build()
 
       case DateType => ProtoDataTypes.DateType
@@ -304,6 +321,26 @@ object DataTypeProtoConverter {
               .setKeyType(toConnectProtoTypeInternal(keyType, bytesToBinary))
               .setValueType(toConnectProtoTypeInternal(valueType, bytesToBinary))
               .setValueContainsNull(valueContainsNull)
+              .build())
+          .build()
+
+      case g: GeographyType =>
+        proto.DataType
+          .newBuilder()
+          .setGeography(
+            proto.DataType.Geography
+              .newBuilder()
+              .setSrid(g.srid)
+              .build())
+          .build()
+
+      case g: GeometryType =>
+        proto.DataType
+          .newBuilder()
+          .setGeometry(
+            proto.DataType.Geometry
+              .newBuilder()
+              .setSrid(g.srid)
               .build())
           .build()
 

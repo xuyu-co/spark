@@ -1016,11 +1016,18 @@ EXECUTE IMMEDIATE (SELECT c FROM (VALUES(1)) AS T(c))
 -- !query analysis
 org.apache.spark.sql.AnalysisException
 {
-  "errorClass" : "INVALID_EXPR_TYPE_FOR_QUERY_EXECUTE_IMMEDIATE",
-  "sqlState" : "42K09",
+  "errorClass" : "UNSUPPORTED_EXPR_FOR_PARAMETER",
+  "sqlState" : "42K0E",
   "messageParameters" : {
-    "exprType" : "\"INT\""
-  }
+    "invalidExprSql" : "\"scalarsubquery()\""
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 19,
+    "stopIndex" : 53,
+    "fragment" : "(SELECT c FROM (VALUES(1)) AS T(c))"
+  } ]
 }
 
 
@@ -1224,3 +1231,43 @@ EXECUTE IMMEDIATE 'SELECT typeof(:p) as type, :p as val' USING MAP(1, 'one', 2, 
 -- !query analysis
 Project [typeof(map(1, one, 2, two)) AS type#x, map(1, one, 2, two) AS val#x]
 +- OneRowRelation
+
+
+-- !query
+EXECUTE IMMEDIATE 'SELECT :param'
+-- !query analysis
+org.apache.spark.sql.AnalysisException
+{
+  "errorClass" : "UNBOUND_SQL_PARAMETER",
+  "sqlState" : "42P02",
+  "messageParameters" : {
+    "name" : "param"
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 8,
+    "stopIndex" : 13,
+    "fragment" : ":param"
+  } ]
+}
+
+
+-- !query
+EXECUTE IMMEDIATE 'SELECT ?'
+-- !query analysis
+org.apache.spark.sql.AnalysisException
+{
+  "errorClass" : "UNBOUND_SQL_PARAMETER",
+  "sqlState" : "42P02",
+  "messageParameters" : {
+    "name" : "_7"
+  },
+  "queryContext" : [ {
+    "objectType" : "",
+    "objectName" : "",
+    "startIndex" : 8,
+    "stopIndex" : 8,
+    "fragment" : "?"
+  } ]
+}

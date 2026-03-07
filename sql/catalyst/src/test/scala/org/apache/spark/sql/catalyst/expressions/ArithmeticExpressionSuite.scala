@@ -119,19 +119,19 @@ class ArithmeticExpressionSuite extends SparkFunSuite with ExpressionEvalHelper 
     withSQLConf(SQLConf.ANSI_ENABLED.key -> "true") {
       checkErrorInExpression[SparkArithmeticException](
         UnaryMinus(Literal(Long.MinValue)), "ARITHMETIC_OVERFLOW",
-        Map("message" -> "long overflow", "alternative" -> "",
+        Map("message" -> "overflow", "alternative" -> "",
           "config" -> toSQLConf(SqlApiConf.ANSI_ENABLED_KEY)))
       checkErrorInExpression[SparkArithmeticException](
         UnaryMinus(Literal(Int.MinValue)), "ARITHMETIC_OVERFLOW",
-        Map("message" -> "integer overflow", "alternative" -> "",
+        Map("message" -> "overflow", "alternative" -> "",
           "config" -> toSQLConf(SqlApiConf.ANSI_ENABLED_KEY)))
       checkErrorInExpression[SparkArithmeticException](
         UnaryMinus(Literal(Short.MinValue)), "ARITHMETIC_OVERFLOW",
-        Map("message" -> "short overflow", "alternative" -> "",
+        Map("message" -> "overflow", "alternative" -> "",
           "config" -> toSQLConf(SqlApiConf.ANSI_ENABLED_KEY)))
       checkErrorInExpression[SparkArithmeticException](
         UnaryMinus(Literal(Byte.MinValue)), "ARITHMETIC_OVERFLOW",
-        Map("message" -> "byte overflow", "alternative" -> "",
+        Map("message" -> "overflow", "alternative" -> "",
           "config" -> toSQLConf(SqlApiConf.ANSI_ENABLED_KEY)))
       checkEvaluation(UnaryMinus(positiveShortLit), (- positiveShort).toShort)
       checkEvaluation(UnaryMinus(negativeShortLit), (- negativeShort).toShort)
@@ -285,34 +285,35 @@ class ArithmeticExpressionSuite extends SparkFunSuite with ExpressionEvalHelper 
       val n1 = makeNum(p1, s1)
       val n2 = makeNum(p2, s2)
 
-      val mulActual = Multiply(
-        Literal(Decimal(BigDecimal(n1), p1, s1)),
-        Literal(Decimal(BigDecimal(n2), p2, s2))
-      )
-      val mulExact = new java.math.BigDecimal(n1).multiply(new java.math.BigDecimal(n2))
-
-      val divActual = Divide(
-        Literal(Decimal(BigDecimal(n1), p1, s1)),
-        Literal(Decimal(BigDecimal(n2), p2, s2))
-      )
-      val divExact = new java.math.BigDecimal(n1)
-        .divide(new java.math.BigDecimal(n2), 100, RoundingMode.DOWN)
-
-      val remActual = Remainder(
-        Literal(Decimal(BigDecimal(n1), p1, s1)),
-        Literal(Decimal(BigDecimal(n2), p2, s2))
-      )
-      val remExact = new java.math.BigDecimal(n1).remainder(new java.math.BigDecimal(n2))
-
-      val quotActual = IntegralDivide(
-        Literal(Decimal(BigDecimal(n1), p1, s1)),
-        Literal(Decimal(BigDecimal(n2), p2, s2))
-      )
-      val quotExact =
-        new java.math.BigDecimal(n1).divideToIntegralValue(new java.math.BigDecimal(n2))
-
       Seq(true, false).foreach { allowPrecLoss =>
         withSQLConf(SQLConf.DECIMAL_OPERATIONS_ALLOW_PREC_LOSS.key -> allowPrecLoss.toString) {
+          val mulActual = Multiply(
+            Literal(Decimal(BigDecimal(n1), p1, s1)),
+            Literal(Decimal(BigDecimal(n2), p2, s2))
+          )
+          val mulExact = new java.math.BigDecimal(n1).multiply(new java.math.BigDecimal(n2))
+
+          val divActual = Divide(
+            Literal(Decimal(BigDecimal(n1), p1, s1)),
+            Literal(Decimal(BigDecimal(n2), p2, s2))
+          )
+          val divExact = new java.math.BigDecimal(n1)
+            .divide(new java.math.BigDecimal(n2), 100, RoundingMode.DOWN)
+
+          val remActual = Remainder(
+            Literal(Decimal(BigDecimal(n1), p1, s1)),
+            Literal(Decimal(BigDecimal(n2), p2, s2))
+          )
+          val remExact = new java.math.BigDecimal(n1).remainder(new java.math.BigDecimal(n2))
+
+          val quotActual = IntegralDivide(
+            Literal(Decimal(BigDecimal(n1), p1, s1)),
+            Literal(Decimal(BigDecimal(n2), p2, s2))
+          )
+          val quotExact =
+            new java.math.BigDecimal(n1).divideToIntegralValue(new java.math.BigDecimal(n2))
+
+
           val mulType = Multiply(null, null).resultDecimalType(p1, s1, p2, s2)
           val mulResult = Decimal(mulExact.setScale(mulType.scale, RoundingMode.HALF_UP))
           val mulExpected =
@@ -483,7 +484,11 @@ class ArithmeticExpressionSuite extends SparkFunSuite with ExpressionEvalHelper 
   }
 
   test("Remainder/Pmod: exception should contain SQL text context") {
-    Seq(("%", Remainder), ("pmod", Pmod)).foreach { case (symbol, exprBuilder) =>
+    type BinaryOpFn = (Expression, Expression, EvalMode.Value) => BinaryArithmetic
+    Seq[(String, BinaryOpFn)](
+      ("%", Remainder.apply),
+      ("pmod", Pmod.apply)
+    ).foreach { case (symbol, exprBuilder) =>
       val query = s"1L $symbol 0L"
       val o = Origin(
         line = Some(1),

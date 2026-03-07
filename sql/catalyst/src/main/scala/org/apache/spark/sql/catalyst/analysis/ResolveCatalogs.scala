@@ -21,10 +21,11 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.spark.SparkException
 import org.apache.spark.sql.AnalysisException
-import org.apache.spark.sql.catalyst.SqlScriptingContextManager
+import org.apache.spark.sql.catalyst.{FunctionIdentifier, SqlScriptingContextManager}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.trees.{CurrentOrigin, Origin}
 import org.apache.spark.sql.catalyst.util.SparkCharVarcharUtils.replaceCharVarcharWithString
 import org.apache.spark.sql.connector.catalog._
 import org.apache.spark.sql.errors.DataTypeErrors.toSQLId
@@ -74,6 +75,7 @@ class ResolveCatalogs(val catalogManager: CatalogManager)
         case plan => plan
       }
       c.copy(names = resolved)
+
     case d @ DropVariable(UnresolvedIdentifier(nameParts, _), _) =>
       if (withinSqlScript) {
         throw new AnalysisException(
@@ -82,6 +84,33 @@ class ResolveCatalogs(val catalogManager: CatalogManager)
       val resolved = catalogManager.tempVariableManager.qualify(nameParts.last)
       assertValidSessionVariableNameParts(nameParts, resolved)
       d.copy(name = resolved)
+
+    case CreateFunction(UnresolvedIdentifier(nameParts, _), _, _, _, _)
+        if isSystemBuiltinName(nameParts) =>
+      throw QueryCompilationErrors.operationNotAllowedOnBuiltinFunctionError(
+        "CREATE", nameParts.last)
+
+    case CreateUserDefinedFunction(UnresolvedIdentifier(nameParts, _),
+        _, _, _, _, _, _, _, _, _, _, _, _)
+        if isSystemBuiltinName(nameParts) =>
+      throw QueryCompilationErrors.operationNotAllowedOnBuiltinFunctionError(
+        "CREATE", nameParts.last)
+
+    case DropFunction(UnresolvedIdentifier(nameParts, _), _)
+        if isSystemBuiltinName(nameParts) =>
+      throw QueryCompilationErrors.operationNotAllowedOnBuiltinFunctionError(
+        "DROP", nameParts.last)
+
+    case d @ DropFunction(u @ UnresolvedIdentifier(nameParts, _), _) =>
+      d.copy(child = resolveFunctionIdentifier(nameParts, u.origin))
+
+    case RefreshFunction(UnresolvedIdentifier(nameParts, _))
+        if isSystemBuiltinName(nameParts) =>
+      throw QueryCompilationErrors.operationNotAllowedOnBuiltinFunctionError(
+        "REFRESH", nameParts.last)
+
+    case r @ RefreshFunction(u @ UnresolvedIdentifier(nameParts, _)) =>
+      r.copy(child = resolveFunctionIdentifier(nameParts, u.origin))
 
     // For CREATE TABLE and REPLACE TABLE statements, resolve the table identifier and include
     // the table columns as output. This allows expressions (e.g., constraints) referencing these
@@ -123,6 +152,39 @@ class ResolveCatalogs(val catalogManager: CatalogManager)
     } else {
       val CatalogAndIdentifier(catalog, identifier) = nameParts
       ResolvedIdentifier(catalog, identifier, columnOutput)
+    }
+  }
+
+  private def isSystemBuiltinName(nameParts: Seq[String]): Boolean = {
+    nameParts.length == 3 &&
+      nameParts(0).equalsIgnoreCase(CatalogManager.SYSTEM_CATALOG_NAME) &&
+      nameParts(1).equalsIgnoreCase(CatalogManager.BUILTIN_NAMESPACE)
+  }
+
+  /**
+   * Resolves a function identifier, checking for builtin and temp functions first.
+   * Only unqualified (1-part) names get special builtin/temp handling; multi-part names
+   * go through standard catalog resolution.
+   */
+  private def resolveFunctionIdentifier(
+      nameParts: Seq[String],
+      origin: Origin): ResolvedIdentifier = CurrentOrigin.withOrigin(origin) {
+    if (nameParts.length == 1) {
+      val funcName = FunctionIdentifier(nameParts.head)
+      val sessionCatalog = catalogManager.v1SessionCatalog
+      if (sessionCatalog.isBuiltinFunction(funcName)) {
+        val ident = Identifier.of(Array(CatalogManager.BUILTIN_NAMESPACE), nameParts.head)
+        ResolvedIdentifier(FakeSystemCatalog, ident)
+      } else if (sessionCatalog.isTemporaryFunction(funcName)) {
+        val ident = Identifier.of(Array(CatalogManager.SESSION_NAMESPACE), nameParts.head)
+        ResolvedIdentifier(FakeSystemCatalog, ident)
+      } else {
+        val CatalogAndIdentifier(catalog, ident) = nameParts
+        ResolvedIdentifier(catalog, ident)
+      }
+    } else {
+      val CatalogAndIdentifier(catalog, ident) = nameParts
+      ResolvedIdentifier(catalog, ident)
     }
   }
 

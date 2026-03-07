@@ -66,7 +66,7 @@ abstract class InMemoryBaseTable(
   extends Table with SupportsRead with SupportsWrite with SupportsMetadataColumns {
 
   // Tracks the current version number of the table.
-  protected var currentTableVersion: Int = 0
+  protected var tableVersion: Int = 0
 
   // Stores the table version validated during the last `ALTER TABLE ... ADD CONSTRAINT` operation.
   private var validatedTableVersion: String = null
@@ -75,14 +75,14 @@ abstract class InMemoryBaseTable(
 
   override def columns(): Array[Column] = tableColumns
 
-  override def currentVersion(): String = currentTableVersion.toString
+  override def version(): String = tableVersion.toString
 
-  def setCurrentVersion(version: String): Unit = {
-    currentTableVersion = version.toInt
+  def setVersion(version: String): Unit = {
+    tableVersion = version.toInt
   }
 
-  def increaseCurrentVersion(): Unit = {
-    currentTableVersion += 1
+  def increaseVersion(): Unit = {
+    tableVersion += 1
   }
 
   def validatedVersion(): String = {
@@ -236,15 +236,26 @@ abstract class InMemoryBaseTable(
           case (v, t) =>
             throw new IllegalArgumentException(s"Match: unsupported argument(s) type - ($v, $t)")
         }
+      // the result should be consistent with BucketFunctions defined at transformFunctions.scala
       case BucketTransform(numBuckets, cols, _) =>
-        val valueTypePairs = cols.map(col => extractor(col.fieldNames, cleanedSchema, row))
-        var valueHashCode = 0
-        valueTypePairs.foreach( pair =>
-          if ( pair._1 != null) valueHashCode += pair._1.hashCode()
-        )
-        var dataTypeHashCode = 0
-        valueTypePairs.foreach(dataTypeHashCode += _._2.hashCode())
-        ((valueHashCode + 31 * dataTypeHashCode) & Integer.MAX_VALUE) % numBuckets
+        val hash: Long = cols.foldLeft(0L) { (acc, col) =>
+          val valueHash = extractor(col.fieldNames, cleanedSchema, row) match {
+            case (value: Byte, _: ByteType) => value.toLong
+            case (value: Short, _: ShortType) => value.toLong
+            case (value: Int, _: IntegerType) => value.toLong
+            case (value: Long, _: LongType) => value
+            case (value: Long, _: TimestampType) => value
+            case (value: Long, _: TimestampNTZType) => value
+            case (value: UTF8String, _: StringType) =>
+              value.hashCode.toLong
+            case (value: Array[Byte], BinaryType) =>
+              util.Arrays.hashCode(value).toLong
+            case (v, t) =>
+              throw new IllegalArgumentException(s"Match: unsupported argument(s) type - ($v, $t)")
+          }
+          acc + valueHash
+        }
+        Math.floorMod(hash, numBuckets)
       case NamedTransform("truncate", Seq(ref: NamedReference, length: V2Literal[_])) =>
         extractor(ref.fieldNames, cleanedSchema, row) match {
           case (str: UTF8String, StringType) =>
@@ -543,6 +554,10 @@ abstract class InMemoryBaseTable(
       }
       new BufferedRowsReaderFactory(metadataColumns.toSeq, nonMetadataColumns, tableSchema)
     }
+
+    override def supportedCustomMetrics(): Array[CustomMetric] = {
+      Array(new RowsReadCustomMetric)
+    }
   }
 
   case class InMemoryBatchScan(
@@ -655,8 +670,6 @@ abstract class InMemoryBaseTable(
 
   protected abstract class TestBatchWrite extends BatchWrite {
 
-    var commitProperties: mutable.Map[String, String] = mutable.Map.empty[String, String]
-
     override def createBatchWriterFactory(info: PhysicalWriteInfo): DataWriterFactory = {
       new BufferedRowsWriterFactory(CatalogV2Util.v2ColumnsToStructType(columns()))
     }
@@ -668,8 +681,7 @@ abstract class InMemoryBaseTable(
 
     override def commit(messages: Array[WriterCommitMessage]): Unit = dataMap.synchronized {
       withData(messages.map(_.asInstanceOf[BufferedRows]))
-      commits += Commit(Instant.now().toEpochMilli, commitProperties.toMap)
-      commitProperties.clear()
+      commits += Commit(Instant.now().toEpochMilli)
     }
   }
 
@@ -678,8 +690,7 @@ abstract class InMemoryBaseTable(
       val newData = messages.map(_.asInstanceOf[BufferedRows])
       dataMap --= newData.flatMap(_.rows.map(getKey))
       withData(newData)
-      commits += Commit(Instant.now().toEpochMilli, commitProperties.toMap)
-      commitProperties.clear()
+      commits += Commit(Instant.now().toEpochMilli)
     }
   }
 
@@ -687,8 +698,7 @@ abstract class InMemoryBaseTable(
     override def commit(messages: Array[WriterCommitMessage]): Unit = dataMap.synchronized {
       dataMap.clear()
       withData(messages.map(_.asInstanceOf[BufferedRows]))
-      commits += Commit(Instant.now().toEpochMilli, commitProperties.toMap)
-      commitProperties.clear()
+      commits += Commit(Instant.now().toEpochMilli)
     }
   }
 
@@ -729,6 +739,10 @@ abstract class InMemoryBaseTable(
         withData(messages.map(_.asInstanceOf[BufferedRows]))
       }
     }
+  }
+
+  def copy(): Table = {
+    throw new UnsupportedOperationException(s"copy is not supported for ${getClass.getName}")
   }
 }
 
@@ -831,10 +845,13 @@ private class BufferedRowsReader(
   }
 
   private var index: Int = -1
+  private var rowsRead: Long = 0
 
   override def next(): Boolean = {
     index += 1
-    index < partition.rows.length
+    val hasNext = index < partition.rows.length
+    if (hasNext) rowsRead += 1
+    hasNext
   }
 
   override def get(): InternalRow = {
@@ -977,6 +994,22 @@ private class BufferedRowsReader(
 
   private def castElement(elem: Any, toType: DataType, fromType: DataType): Any =
     Cast(Literal(elem, fromType), toType, None, EvalMode.TRY).eval(null)
+
+  override def initMetricsValues(metrics: Array[CustomTaskMetric]): Unit = {
+    metrics.foreach { m =>
+      m.name match {
+        case "rows_read" => rowsRead = m.value()
+      }
+    }
+  }
+
+  override def currentMetricsValues(): Array[CustomTaskMetric] = {
+    val metric = new CustomTaskMetric {
+      override def name(): String = "rows_read"
+      override def value(): Long = rowsRead
+    }
+    Array(metric)
+  }
 }
 
 private class BufferedRowsWriterFactory(schema: StructType)
@@ -1045,7 +1078,12 @@ class InMemoryCustomDriverTaskMetric(value: Long) extends CustomTaskMetric {
   override def value(): Long = value
 }
 
-case class Commit(id: Long, properties: Map[String, String])
+class RowsReadCustomMetric extends CustomSumMetric {
+  override def name(): String = "rows_read"
+  override def description(): String = "number of rows read"
+}
+
+case class Commit(id: Long, writeSummary: Option[WriteSummary] = None)
 
 sealed trait Operation
 case object Write extends Operation

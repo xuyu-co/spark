@@ -168,11 +168,20 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
     def stat(self) -> ParentDataFrameStatFunctions:
         return DataFrameStatFunctions(self)
 
-    def toJSON(self, use_unicode: bool = True) -> "RDD[str]":
+    def toJSON(self, use_unicode: bool = True) -> Union["RDD[str]", "DataFrame"]:
         from pyspark.core.rdd import RDD
 
-        rdd = self._jdf.toJSON()
-        return RDD(rdd.toJavaRDD(), self._sc, UTF8Deserializer(use_unicode))
+        returnDataFrame = self.sparkSession._jconf.pysparkToJSONReturnDataFrame()
+        if returnDataFrame:
+            jdf = self._jdf.toJSON()
+            return DataFrame(jdf, self.sparkSession)
+        else:
+            warnings.warn(
+                "The return type of DataFrame.toJSON will be changed from RDD to DataFrame "
+                "in future releases."
+            )
+            rdd = self._jdf.toJSON()
+            return RDD(rdd.toJavaRDD(), self._sc, UTF8Deserializer(use_unicode))
 
     def registerTempTable(self, name: str) -> None:
         warnings.warn("Deprecated in 2.0, use createOrReplaceTempView instead.", FutureWarning)
@@ -271,6 +280,9 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
     def exceptAll(self, other: ParentDataFrame) -> ParentDataFrame:
         return DataFrame(self._jdf.exceptAll(other._jdf), self.sparkSession)
 
+    def zipWithIndex(self, indexColName: str = "index") -> ParentDataFrame:
+        return DataFrame(self._jdf.zipWithIndex(indexColName), self.sparkSession)
+
     def isLocal(self) -> bool:
         return self._jdf.isLocal()
 
@@ -316,15 +328,28 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
             return self._jdf.showString(n, int_truncate, vertical)
 
     def __repr__(self) -> str:
-        if not self._support_repr_html and self.sparkSession._jconf.isReplEagerEvalEnabled():
-            vertical = False
-            return self._jdf.showString(
-                self.sparkSession._jconf.replEagerEvalMaxNumRows(),
-                self.sparkSession._jconf.replEagerEvalTruncate(),
-                vertical,
+        if not self._support_repr_html:
+            (
+                isReplEagerEvalEnabled,
+                replEagerEvalMaxNumRows,
+                replEagerEvalTruncate,
+            ) = self.sparkSession._jconf.getConfs(
+                [
+                    "spark.sql.repl.eagerEval.enabled",
+                    "spark.sql.repl.eagerEval.maxNumRows",
+                    "spark.sql.repl.eagerEval.truncate",
+                ]
             )
-        else:
-            return "DataFrame[%s]" % (", ".join("%s: %s" % c for c in self.dtypes))
+
+            if isReplEagerEvalEnabled == "true":
+                vertical = False
+                return self._jdf.showString(
+                    int(replEagerEvalMaxNumRows),
+                    int(replEagerEvalTruncate),
+                    vertical,
+                )
+
+        return "DataFrame[%s]" % (", ".join("%s: %s" % c for c in self.dtypes))
 
     def _repr_html_(self) -> Optional[str]:
         """Returns a :class:`DataFrame` with html code when you enabled eager evaluation
@@ -333,10 +358,23 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
         """
         if not self._support_repr_html:
             self._support_repr_html = True
-        if self.sparkSession._jconf.isReplEagerEvalEnabled():
+
+        (
+            isReplEagerEvalEnabled,
+            replEagerEvalMaxNumRows,
+            replEagerEvalTruncate,
+        ) = self.sparkSession._jconf.getConfs(
+            [
+                "spark.sql.repl.eagerEval.enabled",
+                "spark.sql.repl.eagerEval.maxNumRows",
+                "spark.sql.repl.eagerEval.truncate",
+            ]
+        )
+
+        if isReplEagerEvalEnabled == "true":
             return self._jdf.htmlString(
-                self.sparkSession._jconf.replEagerEvalMaxNumRows(),
-                self.sparkSession._jconf.replEagerEvalTruncate(),
+                int(replEagerEvalMaxNumRows),
+                int(replEagerEvalTruncate),
             )
         else:
             return None
@@ -441,7 +479,8 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
     def collect(self) -> List[Row]:
         with SCCallSiteSync(self._sc):
             sock_info = self._jdf.collectToPython()
-        return list(_load_from_socket(sock_info, BatchedSerializer(CPickleSerializer())))
+        with _load_from_socket(sock_info, BatchedSerializer(CPickleSerializer())) as stream:
+            return list(stream)
 
     def toLocalIterator(self, prefetchPartitions: bool = False) -> Iterator[Row]:
         with SCCallSiteSync(self._sc):
@@ -462,7 +501,8 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
     def tail(self, num: int) -> List[Row]:
         with SCCallSiteSync(self._sc):
             sock_info = self._jdf.tailToPython(num)
-        return list(_load_from_socket(sock_info, BatchedSerializer(CPickleSerializer())))
+        with _load_from_socket(sock_info, BatchedSerializer(CPickleSerializer())) as stream:
+            return list(stream)
 
     def foreach(self, f: Callable[[Row], None]) -> None:
         self.rdd.foreach(f)
@@ -1813,7 +1853,10 @@ class DataFrame(ParentDataFrame, PandasMapOpsMixin, PandasConversionMixin):
         return PandasConversionMixin.toArrow(self)
 
     def toPandas(self) -> "PandasDataFrameLike":
-        return PandasConversionMixin.toPandas(self)
+        return PandasConversionMixin._to_pandas(self)
+
+    def _to_pandas(self, **kwargs: Any) -> "PandasDataFrameLike":
+        return PandasConversionMixin._to_pandas(self, **kwargs)
 
     def transpose(self, indexColumn: Optional["ColumnOrName"] = None) -> ParentDataFrame:
         if indexColumn is not None:
@@ -1969,11 +2012,19 @@ def _test() -> None:
     globs = pyspark.sql.dataframe.__dict__.copy()
 
     if not have_pandas or not have_pyarrow:
-        del pyspark.sql.dataframe.DataFrame.toArrow.__doc__
         del pyspark.sql.dataframe.DataFrame.toPandas.__doc__
-        del pyspark.sql.dataframe.DataFrame.mapInArrow.__doc__
         del pyspark.sql.dataframe.DataFrame.mapInPandas.__doc__
         del pyspark.sql.dataframe.DataFrame.pandas_api.__doc__
+
+    if not have_pyarrow:
+        del pyspark.sql.dataframe.DataFrame.toArrow.__doc__
+        del pyspark.sql.dataframe.DataFrame.mapInArrow.__doc__
+    else:
+        import pyarrow as pa
+        from pyspark.loose_version import LooseVersion
+
+        if LooseVersion(pa.__version__) < LooseVersion("21.0.0"):
+            del pyspark.sql.dataframe.DataFrame.mapInArrow.__doc__
 
     spark = (
         SparkSession.builder.master("local[4]").appName("sql.classic.dataframe tests").getOrCreate()

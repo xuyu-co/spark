@@ -15,14 +15,17 @@
 # limitations under the License.
 #
 import unittest
+import logging
 from typing import Iterator, Optional
 
 from pyspark.errors import PySparkAttributeError
 from pyspark.errors import PythonException
 from pyspark.sql.functions import arrow_udtf, lit
 from pyspark.sql.types import Row, StructType, StructField, IntegerType
-from pyspark.testing.sqlutils import ReusedSQLTestCase, have_pyarrow, pyarrow_requirement_message
+from pyspark.testing.sqlutils import ReusedSQLTestCase
+from pyspark.testing.utils import have_pyarrow, pyarrow_requirement_message
 from pyspark.testing import assertDataFrameEqual
+from pyspark.util import is_remote_only
 
 if have_pyarrow:
     import pyarrow as pa
@@ -31,6 +34,23 @@ if have_pyarrow:
 
 @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)
 class ArrowUDTFTestsMixin:
+    def test_arrow_udtf_data_conversion_error(self):
+        from pyspark.sql.functions import udtf
+
+        @udtf(returnType="x int, y int")
+        class DataConversionErrorUDTF:
+            def eval(self):
+                # Return a non-tuple value when multiple return values are expected.
+                # This will cause LocalDataToArrowConversion.convert to fail with TypeError (len() on int),
+                # which should be wrapped in UDTF_ARROW_DATA_CONVERSION_ERROR.
+                yield 1
+
+        # Enable Arrow optimization for regular UDTFs
+        with self.sql_conf({"spark.sql.execution.pythonUDTF.arrow.enabled": "true"}):
+            with self.assertRaisesRegex(PythonException, "UDTF_ARROW_DATA_CONVERSION_ERROR"):
+                result_df = DataConversionErrorUDTF()
+                result_df.collect()
+
     def test_arrow_udtf_zero_args(self):
         @arrow_udtf(returnType="id int, value string")
         class TestUDTF:
@@ -1685,18 +1705,61 @@ class ArrowUDTFTestsMixin:
         )
         assertDataFrameEqual(sql_result_df2, expected_df2)
 
+    @unittest.skipIf(is_remote_only(), "Requires JVM access")
+    def test_arrow_udtf_with_logging(self):
+        import pyarrow as pa
+
+        @arrow_udtf(returnType="id bigint, doubled bigint")
+        class TestArrowUDTFWithLogging:
+            def eval(self, table_data: "pa.RecordBatch") -> Iterator["pa.Table"]:
+                assert isinstance(
+                    table_data, pa.RecordBatch
+                ), f"Expected pa.RecordBatch, got {type(table_data)}"
+
+                logger = logging.getLogger("test_arrow_udtf")
+                logger.warning(f"arrow udtf: {table_data.to_pydict()}")
+
+                # Convert record batch to table
+                table = pa.table(table_data)
+
+                # Get the id column and create doubled values
+                id_column = table.column("id")
+                doubled_values = pa.compute.multiply(id_column, pa.scalar(2))
+
+                yield pa.table({"id": id_column, "doubled": doubled_values})
+
+        with self.sql_conf(
+            {
+                "spark.sql.execution.arrow.maxRecordsPerBatch": "3",
+                "spark.sql.pyspark.worker.logging.enabled": "true",
+            }
+        ):
+            assertDataFrameEqual(
+                TestArrowUDTFWithLogging(self.spark.range(9, numPartitions=2).asTable()),
+                [Row(id=i, doubled=i * 2) for i in range(9)],
+            )
+
+            logs = self.spark.tvf.python_worker_logs()
+
+            assertDataFrameEqual(
+                logs.select("level", "msg", "context", "logger"),
+                [
+                    Row(
+                        level="WARNING",
+                        msg=f"arrow udtf: {dict(id=lst)}",
+                        context={"class_name": "TestArrowUDTFWithLogging", "func_name": "eval"},
+                        logger="test_arrow_udtf",
+                    )
+                    for lst in [[0, 1, 2], [3], [4, 5, 6], [7, 8]]
+                ],
+            )
+
 
 class ArrowUDTFTests(ArrowUDTFTestsMixin, ReusedSQLTestCase):
     pass
 
 
 if __name__ == "__main__":
-    from pyspark.sql.tests.arrow.test_arrow_udtf import *  # noqa: F401
+    from pyspark.testing import main
 
-    try:
-        import xmlrunner
-
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)
+    main()

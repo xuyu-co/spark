@@ -81,7 +81,8 @@ class SubstituteParmsAstBuilder extends SqlBaseParserBaseVisitor[AnyRef] {
    */
   override def visitNamedParameterLiteral(ctx: NamedParameterLiteralContext): AnyRef =
     withOrigin(ctx) {
-      val paramName = ctx.namedParameterMarker().identifier().getText
+      // Named parameters use simpleIdentifier, so .getText() is correct.
+      val paramName = ctx.namedParameterMarker().simpleIdentifier().getText
       namedParams += paramName
 
       // Calculate the location of the entire parameter (including the colon)
@@ -117,7 +118,8 @@ class SubstituteParmsAstBuilder extends SqlBaseParserBaseVisitor[AnyRef] {
    */
   override def visitNamedParameterMarkerRule(ctx: NamedParameterMarkerRuleContext): AnyRef =
     withOrigin(ctx) {
-      val paramName = ctx.namedParameterMarker().identifier().getText
+      // Named parameters use simpleIdentifier, so .getText() is correct.
+      val paramName = ctx.namedParameterMarker().simpleIdentifier().getText
       namedParams += paramName
 
       // Calculate the location of the entire parameter (including the colon)
@@ -150,10 +152,31 @@ class SubstituteParmsAstBuilder extends SqlBaseParserBaseVisitor[AnyRef] {
     }
 
   /**
+   * Visit singleStringLit contexts to ensure we traverse into parameter markers. This is needed
+   * because singleStringLit can be either singleStringLitWithoutMarker or parameterMarker, and we
+   * need to visit the parameterMarker child.
+   */
+  override def visitSingleStringLit(ctx: SingleStringLitContext): AnyRef =
+    withOrigin(ctx) {
+      // Visit children to find any parameter markers
+      visitChildren(ctx)
+      null
+    }
+
+  /**
    * Override visit to ensure we traverse all children to find parameters.
    */
   override def visit(tree: ParseTree): AnyRef = {
     if (tree == null) return null
+
+    // Skip cursor query definitions - parameter markers in cursor queries
+    // should not be substituted until OPEN time
+    tree match {
+      case ctx: DeclareCursorStatementContext =>
+        // Don't visit the query() child, only visit other parts if needed
+        return null
+      case _ => // Continue with normal processing
+    }
 
     // Check if this is a parameter literal
     tree match {
@@ -165,6 +188,8 @@ class SubstituteParmsAstBuilder extends SqlBaseParserBaseVisitor[AnyRef] {
         visitNamedParameterMarkerRule(ctx)
       case ctx: PositionalParameterMarkerRuleContext =>
         visitPositionalParameterMarkerRule(ctx)
+      case ctx: SingleStringLitContext =>
+        visitSingleStringLit(ctx)
       case ruleNode: RuleNode =>
         // Continue traversing children for rule nodes (this handles ParameterStringValueContext,
         // ParameterIntegerValueContext, StringLiteralInContextContext, and other rule nodes
